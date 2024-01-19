@@ -264,6 +264,14 @@ impl Slot {
     pub fn new(round: Round, authority: AuthorityIndex) -> Self {
         Self { round, authority }
     }
+
+    #[cfg(test)]
+    pub fn new_for_test(round: Round, authority: u32) -> Self {
+        Self {
+            round,
+            authority: AuthorityIndex::new_for_test(authority),
+        }
+    }
 }
 
 impl From<BlockRef> for Slot {
@@ -412,7 +420,7 @@ impl fmt::Debug for VerifiedBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{:?}({}ms;{:?};{}v)",
+            "{:?}({}ms;{:?};{};v)",
             self.reference(),
             self.timestamp_ms(),
             self.ancestors(),
