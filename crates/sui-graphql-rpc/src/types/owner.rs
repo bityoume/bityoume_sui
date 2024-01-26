@@ -433,9 +433,15 @@ impl OwnerImpl {
         name: DynamicFieldName,
     ) -> Result<Option<DynamicField>> {
         use DynamicFieldType as T;
-        DynamicField::query(ctx.data_unchecked(), self.address, name, T::DynamicField)
-            .await
-            .extend()
+        DynamicField::query(
+            ctx.data_unchecked(),
+            self.address,
+            name,
+            T::DynamicField,
+            self.checkpoint_viewed_at,
+        )
+        .await
+        .extend()
     }
 
     pub(crate) async fn dynamic_object_field(
@@ -444,9 +450,15 @@ impl OwnerImpl {
         name: DynamicFieldName,
     ) -> Result<Option<DynamicField>> {
         use DynamicFieldType as T;
-        DynamicField::query(ctx.data_unchecked(), self.address, name, T::DynamicObject)
-            .await
-            .extend()
+        DynamicField::query(
+            ctx.data_unchecked(),
+            self.address,
+            name,
+            T::DynamicObject,
+            self.checkpoint_viewed_at,
+        )
+        .await
+        .extend()
     }
 
     pub(crate) async fn dynamic_fields(
@@ -458,9 +470,14 @@ impl OwnerImpl {
         before: Option<object::Cursor>,
     ) -> Result<Connection<String, DynamicField>> {
         let page = Page::from_params(ctx.data_unchecked(), first, after, last, before)?;
-        DynamicField::paginate(ctx.data_unchecked(), page, self.address)
-            .await
-            .extend()
+        DynamicField::paginate(
+            ctx.data_unchecked(),
+            page,
+            self.address,
+            self.checkpoint_viewed_at,
+        )
+        .await
+        .extend()
     }
 }
 
