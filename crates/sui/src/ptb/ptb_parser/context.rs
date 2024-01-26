@@ -5,7 +5,7 @@ use crate::ptb::ptb_parser::errors::PTBError;
 
 use super::errors::PTBResult;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileScope {
     pub file_command_index: usize,
     pub name: String,
@@ -47,11 +47,13 @@ impl PTBContext {
                     "ICE: Expected file scope '{}' but got '{}'",
                     name, self.current_file_scope.name
                 ),
+                span: None,
             });
         }
         let scope = self.file_scopes.pop().ok_or_else(|| PTBError::WithSource {
             file_scope: self.current_file_scope.clone(),
             message: "ICE: No file scopes to pop".to_owned(),
+            span: None,
         })?;
         self.current_file_scope = scope;
         Ok(())

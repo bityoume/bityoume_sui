@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ptb::ptb_parser::build_ptb::PTBBuilder;
+use crate::ptb::ptb_parser::errors::render_errors;
 use crate::ptb::ptb_parser::parser::PTBParser;
 use anyhow::anyhow;
 use clap::parser::ValuesRef;
@@ -339,21 +340,25 @@ impl PTB {
 
         // Build the PTB
         let mut parser = PTBParser::new();
-        for command in commands {
+        for command in commands.clone() {
             parser.parse(command.1);
         }
 
         let (parsed, errors) = parser.finish();
 
         if !errors.is_empty() {
-            let errs: Vec<_> = errors
-                .iter()
-                .enumerate()
-                .map(|(i, e)| format!("[{i}]: {e}"))
-                .collect();
+            let rendered = render_errors(commands, errors);
+            for e in rendered.iter() {
+                println!("{:?}", e);
+            }
+            // let errs: Vec<_> = errors
+            //     .iter()
+            //     .enumerate()
+            //     .map(|(i, e)| format!("[{i}]: {e}"))
+            //     .collect();
             anyhow::bail!(
-                "Encountered errors when parsing the PTB\n{}",
-                errs.join("\n")
+                "Encountered errors when parsing the PTB",
+                // errs.join("\n")
             );
         }
 
@@ -370,14 +375,18 @@ impl PTB {
 
         let (ptb, budget, _preview) = match builder.finish() {
             Err(errors) => {
-                let errs: Vec<_> = errors
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| format!("[{i}]: {e}"))
-                    .collect();
+                let rendered = render_errors(commands, errors);
+                for e in rendered.iter() {
+                    println!("{:?}", e);
+                }
+                // let errs: Vec<_> = errors
+                //     .iter()
+                //     .enumerate()
+                //     .map(|(i, e)| format!("[{i}]: {e}"))
+                //     .collect();
                 anyhow::bail!(
-                    "Encountered errors when building the PTB:\n{}",
-                    errs.join("\n")
+                    "Encountered errors when building the PTB",
+                    // errs.join("\n")
                 );
             }
             Ok(x) => x,

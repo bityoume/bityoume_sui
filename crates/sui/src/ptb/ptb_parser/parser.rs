@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ptb::ptb::PTBCommand;
+use crate::ptb::{ptb::PTBCommand, ptb_parser::argument::span};
 
 use move_command_line_common::{
     address::NumericalAddress,
@@ -9,33 +9,28 @@ use move_command_line_common::{
     types::TypeToken,
 };
 use move_core_types::identifier::Identifier;
-use std::{borrow::BorrowMut, marker::PhantomData, str::FromStr};
+use std::{fmt::Debug, str::FromStr};
 
 use crate::ptb::ptb_parser::argument_token::ArgumentToken;
 use anyhow::{anyhow, bail, Context, Result};
 
 use super::{
-    argument::Argument, command_token::CommandToken, context::PTBContext, errors::PTBError,
+    argument::{Argument, Span, Spanned},
+    command_token::CommandToken,
+    context::PTBContext,
+    errors::PTBError,
 };
 
 /// A parsed PTB command consisting of the command and the parsed arguments to the command.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ParsedPTBCommand {
     pub name: CommandToken,
-    pub args: Vec<Argument>,
+    pub args: Vec<Spanned<Argument>>,
 }
 
 /// The parser for PTB command arguments.
-pub struct ValueParser<
-    'a,
-    I: Iterator<Item = (ArgumentToken, &'a str)>,
-    P: BorrowMut<Parser<'a, ArgumentToken, I>>,
-> {
-    inner: P,
-    // The current argument index that we are parsing. This is used for error reporting.
-    arg_index: usize,
-    _a: PhantomData<&'a ()>,
-    _i: PhantomData<I>,
+pub struct ValueParser<'a> {
+    inner: Spanner<'a>,
 }
 
 /// The PTB parsing context used when parsing PTB commands. This consists of:
@@ -73,6 +68,7 @@ impl PTBParser {
             self.errors.push(PTBError::WithSource {
                 file_scope: self.context.current_file_scope().clone(),
                 message: format!("Failed to parse command name: {e}"),
+                span: None,
             });
             return;
         };
@@ -99,13 +95,21 @@ impl PTBParser {
                             "Invalid command -- expected 1 argument, got {}",
                             cmd.values.len()
                         ),
+                        span: None,
                     });
                     return;
                 }
                 self.context.increment_file_command_index();
                 self.parsed.push(ParsedPTBCommand {
                     name,
-                    args: vec![Argument::String(cmd.values[0].clone())],
+                    args: vec![Spanned {
+                        span: Span {
+                            start: 0,
+                            end: cmd.values[0].len(),
+                            arg_idx: 0,
+                        },
+                        value: Argument::String(cmd.values[0].clone()),
+                    }],
                 });
                 return;
             }
@@ -114,12 +118,17 @@ impl PTBParser {
         let args = cmd
             .values
             .iter()
-            .map(|v| Self::parse_values(&v))
+            .enumerate()
+            .map(|(i, v)| Self::parse_values(&v, i))
             .collect::<Result<Vec<_>>>()
             .map_err(|e| PTBError::WithSource {
                 file_scope: self.context.current_file_scope().clone(),
                 message: format!("Failed to parse arguments for '{}' command. {e}", cmd.name),
+                // TODO(tzakian): Span for parse errors too!
+                span: None,
             });
+
+        // println!("args: {:#?}", args);
 
         self.context.increment_file_command_index();
 
@@ -135,62 +144,143 @@ impl PTBParser {
     }
 
     /// Parse a string to a list of values. Values are separated by whitespace.
-    pub fn parse_values(s: &str) -> Result<Vec<Argument>> {
+    pub fn parse_values(s: &str, arg_idx: usize) -> Result<Vec<Spanned<Argument>>> {
         let tokens: Vec<_> = ArgumentToken::tokenize(s)?;
-        let mut parser = ValueParser::new(tokens);
+        let stokens = Spanner::new(tokens, arg_idx);
+        let mut parser = ValueParser::new(stokens, arg_idx);
         let res = parser.parse_arguments()?;
-        if let Ok((_, contents)) = parser.inner().advance_any() {
+        if let Ok((_, contents)) = parser.advance_any() {
             bail!("Expected end of token stream. Got: {}", contents)
         }
         Ok(res)
     }
 }
 
-impl<'a, I: Iterator<Item = (ArgumentToken, &'a str)>>
-    ValueParser<'a, I, Parser<'a, ArgumentToken, I>>
-{
-    pub fn new<T: IntoIterator<Item = (ArgumentToken, &'a str), IntoIter = I>>(v: T) -> Self {
-        Self::from_parser(Parser::new(v))
-    }
+#[macro_export]
+macro_rules! sp {
+    (_, $value:pat) => {
+        $crate::ptb::ptb_parser::argument::Spanned { value: $value, .. }
+    };
+    ($loc:pat, _) => {
+        $crate::ptb::ptb_parser::argument::Spanned { span: $loc, .. }
+    };
+    ($loc:pat, $value:pat) => {
+        $crate::ptb::ptb_parser::argument::Spanned {
+            span: $loc,
+            value: $value,
+        }
+    };
 }
 
-impl<'a, I, P> ValueParser<'a, I, P>
-where
-    I: Iterator<Item = (ArgumentToken, &'a str)>,
-    P: BorrowMut<Parser<'a, ArgumentToken, I>>,
-{
-    pub fn from_parser(inner: P) -> Self {
-        Self {
-            inner,
-            arg_index: 0,
-            _a: PhantomData,
-            _i: PhantomData,
+#[macro_export]
+macro_rules! bind {
+    ($loc:pat, $value:pat = $rhs:expr, $err:expr) => {
+        let x = $rhs;
+        let loc = x.span;
+        let ($loc, $value) = (loc.clone(), x.value) else {
+            return $err(loc);
+        };
+    };
+}
+
+pub struct Spanner<'a> {
+    pub span: Span,
+    pub tokens: Vec<(ArgumentToken, &'a str)>,
+}
+
+impl<'a> Spanner<'a> {
+    pub fn new(mut tokens: Vec<(ArgumentToken, &'a str)>, arg_idx: usize) -> Self {
+        tokens.reverse();
+        let span = Span {
+            start: 0,
+            end: 0,
+            arg_idx,
+        };
+        Self { span, tokens }
+    }
+
+    pub fn next(&mut self) -> Option<(ArgumentToken, &'a str)> {
+        if let Some((tok, contents)) = self.tokens.pop() {
+            self.span.end += contents.len();
+            Some((tok, contents))
+        } else {
+            None
         }
     }
 
-    /// Parse a list of arguments separated by whitespace.
-    pub fn parse_arguments(&mut self) -> Result<Vec<Argument>> {
-        let args = self.inner().parse_list(
-            |p| ValueParser::from_parser(p).parse_argument_outer(),
-            ArgumentToken::Whitespace,
-            /* not checked */ ArgumentToken::Void,
-            /* allow_trailing_delim */ true,
-        )?;
-        Ok(args)
+    pub fn peek(&self) -> Option<(ArgumentToken, &'a str)> {
+        self.tokens.last().copied()
     }
 
-    /// Parse a numerical address.
-    fn parse_address(contents: &str) -> Result<NumericalAddress> {
-        NumericalAddress::parse_str(contents)
-            .map_err(|s| anyhow!("Failed to parse address '{}'. Got error: {}", contents, s))
+    pub fn end_span(&mut self) -> Span {
+        let x = self.span.clone();
+        self.span.start = self.span.end;
+        x
     }
 
-    /// Parse an argument. Used to keep track of the current argument index that we are at for
-    /// better error reporting.
-    pub fn parse_argument_outer(&mut self) -> Result<Argument> {
-        self.arg_index += 1;
-        self.parse_argument()
-            .with_context(|| format!("Failed to parse argument #{}", self.arg_index,))
+    pub fn curr_end(&self) -> usize {
+        self.span.end
+    }
+}
+
+impl<'a> Iterator for Spanner<'a> {
+    type Item = (ArgumentToken, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next()
+    }
+}
+
+impl<'a> ValueParser<'a> {
+    pub fn new(v: Spanner<'a>, arg_idx: usize) -> Self {
+        Self { inner: v }
+    }
+
+    pub fn advance_any(&mut self) -> Result<(ArgumentToken, &'a str)> {
+        match self.inner.next() {
+            Some(tok) => Ok(tok),
+            None => bail!("unexpected end of tokens"),
+        }
+    }
+
+    pub fn advance(&mut self, expected_token: ArgumentToken) -> Result<&'a str> {
+        let (t, contents) = self.advance_any()?;
+        if t != expected_token {
+            bail!("expected token {}, got {}", expected_token, t)
+        }
+        Ok(contents)
+    }
+
+    pub fn peek(&mut self) -> Option<(ArgumentToken, &'a str)> {
+        self.inner.peek()
+    }
+
+    pub fn peek_tok(&mut self) -> Option<ArgumentToken> {
+        self.inner.peek().map(|(tok, _)| tok)
+    }
+
+    pub fn parse_list<R>(
+        &mut self,
+        parse_list_item: impl Fn(&mut Self) -> Result<R>,
+        delim: ArgumentToken,
+        end_token: ArgumentToken,
+        allow_trailing_delim: bool,
+    ) -> Result<Vec<R>> {
+        let is_end = |tok_opt: Option<ArgumentToken>| -> bool {
+            tok_opt.map(|tok| tok == end_token).unwrap_or(true)
+        };
+        let mut v = vec![];
+        while !is_end(self.peek_tok()) {
+            v.push(parse_list_item(self)?);
+            if is_end(self.peek_tok()) {
+                break;
+            }
+            self.advance(delim)?;
+            if is_end(self.peek_tok()) && allow_trailing_delim {
+                break;
+            }
+        }
+        Ok(v)
     }
 
     /// Parses a list of items separated by `delim` and terminated by `end_token`, skipping any
@@ -206,11 +296,10 @@ where
         allow_trailing_delim: bool,
     ) -> Result<Vec<R>> {
         let is_end = |parser: &mut Self| -> Result<bool> {
-            while parser.inner().peek_tok() == Some(skip) {
-                parser.inner().advance(skip)?;
+            while parser.peek_tok() == Some(skip) {
+                parser.advance(skip)?;
             }
             let is_end = parser
-                .inner()
                 .peek_tok()
                 .map(|tok| tok == end_token)
                 .unwrap_or(true);
@@ -224,43 +313,108 @@ where
             if is_end(self)? {
                 break;
             }
-            self.inner().advance(delim)?;
+            self.advance(delim)?;
             if is_end(self)? && allow_trailing_delim {
                 break;
             }
         }
         Ok(v)
     }
+}
+
+pub struct ParsingErr {
+    pub span: Span,
+    pub message: String,
+}
+
+type ParsingResult<T> = Result<T, ParsingErr>;
+
+impl<'a> ValueParser<'a> {
+    /// Parse a list of arguments separated by whitespace.
+    pub fn parse_arguments(&mut self) -> Result<Vec<Spanned<Argument>>> {
+        let args = self.parse_list(
+            |p| p.parse_argument_outer(),
+            ArgumentToken::Whitespace,
+            /* not checked */ ArgumentToken::Void,
+            /* allow_trailing_delim */ true,
+        )?;
+        Ok(args)
+    }
+
+    /// Parse an argument. Used to keep track of the current argument index that we are at for
+    /// better error reporting.
+    pub fn parse_argument_outer(&mut self) -> Result<Spanned<Argument>> {
+        let arg = self.parse_argument().with_context(|| {
+            format!(
+                "Failed to parse argument at index {}",
+                self.inner.span.arg_idx
+            )
+        });
+        // TODO: Span for parse errors too!
+        arg.map(|arg| Spanned {
+            span: self.inner.end_span(),
+            value: arg,
+        })
+    }
+
+    /// Parse a numerical address.
+    fn parse_address(contents: &str) -> Result<NumericalAddress> {
+        NumericalAddress::parse_str(contents)
+            .map_err(|s| anyhow!("Failed to parse address '{}'. Got error: {}", contents, s))
+    }
 
     /// Parse a single PTB argument. This is the main parsing function for PTB arguments.
     pub fn parse_argument(&mut self) -> Result<Argument> {
         use super::argument_token::ArgumentToken as Tok;
         use Argument as V;
-        Ok(match self.inner().advance_any()? {
+        Ok(match self.advance_any()? {
             (Tok::Ident, "true") => V::Bool(true),
             (Tok::Ident, "false") => V::Bool(false),
-            (Tok::Number, contents) if matches!(self.inner().peek_tok(), Some(Tok::ColonColon)) => {
+            (Tok::Number, contents) if matches!(self.peek_tok(), Some(Tok::ColonColon)) => {
                 let address = Self::parse_address(contents)
                     .with_context(|| format!("Unable to parse address '{contents}'"))?;
-                self.inner().advance(Tok::ColonColon)?;
+                let addr_end = self.inner.curr_end();
+                self.advance(Tok::ColonColon)?;
+                let module_start = self.inner.curr_end();
                 let module_name = Identifier::new(
-                    self.inner()
-                        .advance(Tok::Ident)
+                    self.advance(Tok::Ident)
                         .with_context(|| format!("Unable to parse module name"))?,
                 )
                 .with_context(|| format!("Unable to parse module name"))?;
-                self.inner()
-                    .advance(Tok::ColonColon)
+                let module_end = self.inner.curr_end();
+                self.advance(Tok::ColonColon)
                     .with_context(|| format!("Missing '::' after module name"))?;
+                let fn_start = self.inner.curr_end();
                 let function_name = Identifier::new(
-                    self.inner()
-                        .advance(Tok::Ident)
+                    self.advance(Tok::Ident)
                         .with_context(|| format!("Unable to parse function name"))?,
                 )?;
+                let fn_end = self.inner.curr_end();
                 V::ModuleAccess {
-                    address,
-                    module_name,
-                    function_name,
+                    address: span(
+                        Span {
+                            start: addr_end - contents.len(),
+                            end: addr_end,
+                            arg_idx: self.inner.span.arg_idx,
+                        },
+                        address,
+                    ),
+                    module_name: span(
+                        Span {
+                            start: module_start,
+                            end: module_end,
+                            arg_idx: self.inner.span.arg_idx,
+                        },
+                        module_name,
+                    ),
+                    function_name: span(
+                        Span {
+                            start: fn_start,
+                            end: fn_end,
+                            arg_idx: self.inner.span.arg_idx,
+                        },
+                        function_name,
+                    ),
                 }
             }
             (Tok::Number, contents) => {
@@ -289,57 +443,92 @@ where
                 }
             }
             (Tok::At, _) => {
-                let (_, contents) = self.inner().advance_any()?;
+                let (_, contents) = self.advance_any()?;
                 let address = Self::parse_address(contents)?;
                 V::Address(address)
             }
             (Tok::Some_, _) => {
-                self.inner().advance(Tok::LParen)?;
+                self.advance(Tok::LParen)?;
+                let start = self.inner.curr_end();
                 let arg = self.parse_argument()?;
-                self.inner().advance(Tok::RParen)?;
-                V::Option(Some(Box::new(arg)))
+                let end = self.inner.curr_end();
+                self.advance(Tok::RParen)?;
+                V::Option(Spanned {
+                    span: Span {
+                        start,
+                        end,
+                        arg_idx: self.inner.span.arg_idx,
+                    },
+                    value: Some(Box::new(arg)),
+                })
             }
-            (Tok::None_, _) => V::Option(None),
+            (Tok::None_, c) => V::Option(Spanned {
+                span: Span {
+                    start: self.inner.curr_end() - c.len(),
+                    end: self.inner.curr_end(),
+                    arg_idx: self.inner.span.arg_idx,
+                },
+                value: None,
+            }),
             (Tok::DoubleQuote, contents) => V::String(contents.to_owned()),
             (Tok::SingleQuote, contents) => V::String(contents.to_owned()),
             (Tok::Vector, _) => {
-                self.inner().advance(Tok::LBracket)?;
+                self.advance(Tok::LBracket)?;
                 let values = self.parse_list_skip(
-                    |p| p.parse_argument(),
+                    |p| p.parse_argument_outer(),
                     ArgumentToken::Comma,
                     Tok::RBracket,
                     Tok::Whitespace,
                     /* allow_trailing_delim */ true,
                 )?;
-                self.inner().advance(Tok::RBracket)?;
+                self.advance(Tok::RBracket)?;
                 V::Vector(values)
             }
             (Tok::LBracket, _) => {
                 let values = self.parse_list_skip(
-                    |p| p.parse_argument(),
+                    |p| p.parse_argument_outer(),
                     ArgumentToken::Comma,
                     Tok::RBracket,
                     Tok::Whitespace,
                     /* allow_trailing_delim */ true,
                 )?;
-                self.inner().advance(Tok::RBracket)?;
+                self.advance(Tok::RBracket)?;
                 V::Array(values)
             }
-            (Tok::Ident, contents) if matches!(self.inner().peek_tok(), Some(Tok::Dot)) => {
+            (Tok::Ident, contents) if matches!(self.peek_tok(), Some(Tok::Dot)) => {
+                let ident_start = self.inner.curr_end() - contents.len();
                 let prefix = Identifier::new(contents)?;
                 let mut fields = vec![];
-                self.inner().advance(Tok::Dot)?;
-                while let Ok((_, contents)) = self.inner().advance_any() {
-                    fields.push(
-                        u16::from_str(contents)
+                self.advance(Tok::Dot)?;
+                let mut start = self.inner.curr_end();
+                while let Ok((_, contents)) = self.advance_any() {
+                    let end = self.inner.curr_end();
+                    fields.push(Spanned {
+                        span: Span {
+                            start,
+                            end,
+                            arg_idx: self.inner.span.arg_idx,
+                        },
+                        value: u16::from_str(contents)
                             .context("Invalid field access -- expected a number")?,
-                    );
-                    if !matches!(self.inner().peek_tok(), Some(Tok::Dot)) {
+                    });
+                    if !matches!(self.peek_tok(), Some(Tok::Dot)) {
                         break;
                     }
-                    self.inner().advance(Tok::Dot)?;
+                    self.advance(Tok::Dot)?;
+                    start = self.inner.curr_end();
                 }
-                V::VariableAccess(prefix, fields)
+                V::VariableAccess(
+                    Spanned {
+                        span: Span {
+                            start: ident_start,
+                            end: ident_start + contents.len(),
+                            arg_idx: self.inner.span.arg_idx,
+                        },
+                        value: prefix,
+                    },
+                    fields,
+                )
             }
             (Tok::Ident, contents) => V::Identifier(Identifier::new(contents)?),
             (Tok::TypeArgString, contents) => {
@@ -360,10 +549,6 @@ where
             (Tok::Gas, _) => V::Gas,
             x => bail!("unexpected token {:?}, expected argument", x),
         })
-    }
-
-    pub fn inner(&mut self) -> &mut Parser<'a, ArgumentToken, I> {
-        self.inner.borrow_mut()
     }
 }
 
