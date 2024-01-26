@@ -196,7 +196,8 @@ mod test {
 
     #[test]
     fn get_unncommitted_blocks() {
-        let context = Arc::new(Context::new_for_test());
+        let (context, _) = Context::new_for_test();
+        let context = Arc::new(context);
         let store = Arc::new(MemStore::new());
         let mut dag_state = DagState::new(context.clone(), store.clone());
 
@@ -284,7 +285,8 @@ mod test {
     #[test]
     fn ancestors_at_uncommitted_round() {
         // Initialize DagState.
-        let context = Arc::new(Context::new_for_test());
+        let (context, _) = Context::new_for_test();
+        let context = Arc::new(context);
         let store = Arc::new(MemStore::new());
         let mut dag_state = DagState::new(context.clone(), store.clone());
 
