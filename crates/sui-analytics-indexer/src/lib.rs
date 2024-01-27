@@ -113,6 +113,15 @@ pub struct AnalyticsIndexerConfig {
         default_value = "/opt/sui/db/package_cache"
     )]
     pub package_cache_path: PathBuf,
+    // Directory to contain the package mapping for package pipeline
+    #[clap(
+        long,
+        value_enum,
+        long,
+        global = true,
+        default_value = "/opt/sui/db/package_map_cache"
+    )]
+    pub package_map_cache_path: PathBuf,
     #[clap(long, default_value = None, global = true)]
     pub bq_service_account_key_file: Option<String>,
     #[clap(long, default_value = None, global = true)]
@@ -728,7 +737,8 @@ pub async fn make_move_package_processor(
     config: AnalyticsIndexerConfig,
     metrics: AnalyticsMetrics,
 ) -> Result<Processor> {
-    let handler: Box<dyn AnalyticsHandler<MovePackageEntry>> = Box::new(PackageHandler::new());
+    let handler: Box<dyn AnalyticsHandler<MovePackageEntry>> =
+        Box::new(PackageHandler::new(&config.package_map_cache_path));
     let starting_checkpoint_seq_num =
         get_starting_checkpoint_seq_num(config.clone(), FileType::MovePackage).await?;
     let writer = make_writer::<MovePackageEntry>(
