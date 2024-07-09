@@ -54,6 +54,7 @@ feature_flags:
   mysticeti_use_committed_subdag_digest: true
   fresh_vm_on_framework_upgrade: true
   mysticeti_num_leaders_per_round: 1
+  soft_bundle: true
 max_tx_size_bytes: 131072
 max_input_objects: 2048
 max_size_written_objects: 5000000
@@ -144,6 +145,8 @@ buffer_stake_for_protocol_upgrade_bps: 5000
 address_from_bytes_cost_base: 52
 address_to_u256_cost_base: 52
 address_from_u256_cost_base: 52
+config_read_setting_impl_cost_base: 100
+config_read_setting_impl_cost_per_byte: 40
 dynamic_field_hash_type_and_key_cost_base: 100
 dynamic_field_hash_type_and_key_type_cost_per_byte: 2
 dynamic_field_hash_type_and_key_value_cost_per_byte: 2
@@ -281,4 +284,4 @@ consensus_max_transactions_in_block_bytes: 6291456
 max_deferral_rounds_for_congestion_control: 10
 min_checkpoint_interval_ms: 200
 checkpoint_summary_version_specific_data: 1
-
+max_soft_bundle_size: 5

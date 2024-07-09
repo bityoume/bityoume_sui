@@ -43,6 +43,7 @@ feature_flags:
   enable_coin_deny_list: true
   enable_group_ops_native_functions: true
   reject_mutable_random_on_entry_functions: true
+  consensus_choice: Mysticeti
   consensus_network: Tonic
   zklogin_max_epoch_upper_bound_delta: 30
   reshare_at_same_initial_version: true
@@ -140,6 +141,8 @@ buffer_stake_for_protocol_upgrade_bps: 5000
 address_from_bytes_cost_base: 52
 address_to_u256_cost_base: 52
 address_from_u256_cost_base: 52
+config_read_setting_impl_cost_base: 100
+config_read_setting_impl_cost_per_byte: 40
 dynamic_field_hash_type_and_key_cost_base: 100
 dynamic_field_hash_type_and_key_type_cost_per_byte: 2
 dynamic_field_hash_type_and_key_value_cost_per_byte: 2
