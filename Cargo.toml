@@ -169,6 +169,7 @@ members = [
   "crates/typed-store",
   "crates/typed-store-derive",
   "crates/typed-store-error",
+  "crates/typed-store-workspace-hack",
   "crates/x",
   "narwhal/config",
   "narwhal/crypto",
@@ -408,7 +409,6 @@ proptest-derive = "0.3.0"
 prost = "0.13"
 prost-build = "0.13"
 protobuf = { version = "2.28", features = ["with-bytes"] }
-protobuf-src = "1.1.0"
 quinn-proto = "0.11"
 quote = "1.0.23"
 rand = "0.8.5"
@@ -421,13 +421,6 @@ reqwest = { version = "0.12", default_features = false, features = [
   "rustls-tls",
 ] }
 roaring = "=0.10.3"
-rocksdb = { version = "0.21.0", features = [
-  "snappy",
-  "lz4",
-  "zstd",
-  "zlib",
-  "multi-threaded-cf",
-], default-features = false }
 ron = "0.8.0"
 rstest = "0.16.0"
 rusoto_core = { version = "0.48.0", default_features = false, features = [
@@ -671,7 +664,6 @@ telemetry-subscribers = { path = "crates/telemetry-subscribers" }
 test-cluster = { path = "crates/test-cluster" }
 transaction-fuzzer = { path = "crates/transaction-fuzzer" }
 typed-store = { path = "crates/typed-store" }
-typed-store-derive = { path = "crates/typed-store-derive" }
 typed-store-error = { path = "crates/typed-store-error" }
 x = { path = "crates/x" }
 
