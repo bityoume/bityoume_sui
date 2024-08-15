@@ -1,5 +1,25 @@
 # @mysten/sui.js
 
+## 1.6.0
+
+### Minor Changes
+
+- a3e32fe: `WaitForLocalExecution` now waits using client.waitForTransaction rather than sending
+  requestType to the RPC node. This change will preserve readAfterWrite consistency when local
+  execution is removed from fullnodes, at the cost of more network requests and higher latency.
+
+## 1.5.0
+
+### Minor Changes
+
+- 0851b31: Deprecate requestType option when executing transactions
+
+### Patch Changes
+
+- f37b3c2: Add PerEpochConfig and Cancelled to UnchangedSharedKind
+- Updated dependencies [f37b3c2]
+  - @mysten/bcs@1.0.4
+
 ## 1.4.0
 
 ### Minor Changes
