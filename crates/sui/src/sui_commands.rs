@@ -493,7 +493,7 @@ impl SuiCommand {
                     PersistedConfig::read(&bridge_committee_config_path).map_err(|err| {
                         err.context(format!(
                             "Cannot open Bridge Committee config file at {:?}",
-                            network_config_path
+                            bridge_committee_config_path
                         ))
                     })?;
 
@@ -700,7 +700,7 @@ async fn start(
             .map_err(|_| anyhow!("Invalid indexer host and port"))?;
         tracing::info!("Starting the indexer service at {indexer_address}");
         // Start in writer mode
-        start_test_indexer::<diesel::PgConnection>(
+        start_test_indexer(
             Some(pg_address.clone()),
             fullnode_url.clone(),
             ReaderWriterConfig::writer_mode(None),
@@ -710,7 +710,7 @@ async fn start(
         info!("Indexer in writer mode started");
 
         // Start in reader mode
-        start_test_indexer::<diesel::PgConnection>(
+        start_test_indexer(
             Some(pg_address.clone()),
             fullnode_url.clone(),
             ReaderWriterConfig::reader_mode(indexer_address.to_string()),

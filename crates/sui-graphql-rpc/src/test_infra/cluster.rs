@@ -37,7 +37,7 @@ pub const DEFAULT_INTERNAL_DATA_SOURCE_PORT: u16 = 3000;
 
 pub struct ExecutorCluster {
     pub executor_server_handle: JoinHandle<()>,
-    pub indexer_store: PgIndexerStore<diesel::PgConnection>,
+    pub indexer_store: PgIndexerStore,
     pub indexer_join_handle: JoinHandle<Result<(), IndexerError>>,
     pub graphql_server_join_handle: JoinHandle<()>,
     pub graphql_client: SimpleClient,
@@ -48,7 +48,7 @@ pub struct ExecutorCluster {
 
 pub struct Cluster {
     pub validator_fullnode_handle: TestCluster,
-    pub indexer_store: PgIndexerStore<diesel::PgConnection>,
+    pub indexer_store: PgIndexerStore,
     pub indexer_join_handle: JoinHandle<Result<(), IndexerError>>,
     pub graphql_server_join_handle: JoinHandle<()>,
     pub graphql_client: SimpleClient,
@@ -127,7 +127,7 @@ pub async fn serve_executor(
 
     let executor_server_handle = tokio::spawn(async move {
         sui_rest_api::RestService::new_without_version(executor)
-            .start_service(executor_server_url, Some("/rest".to_owned()))
+            .start_service(executor_server_url)
             .await;
     });
 
@@ -343,7 +343,7 @@ impl ExecutorCluster {
         self.cancellation_token.cancel();
         let _ = join!(self.graphql_server_join_handle, self.indexer_join_handle);
         let db_url = self.graphql_connection_config.db_url.clone();
-        force_delete_database::<diesel::PgConnection>(db_url).await;
+        force_delete_database(db_url).await;
     }
 
     pub async fn force_objects_snapshot_catchup(&self, start_cp: u64, end_cp: u64) {

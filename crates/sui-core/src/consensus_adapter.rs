@@ -6,11 +6,11 @@ use bytes::Bytes;
 use dashmap::try_result::TryResult;
 use dashmap::DashMap;
 use futures::future::{select, Either};
-use futures::pin_mut;
+use futures::stream::FuturesUnordered;
 use futures::FutureExt;
+use futures::{pin_mut, StreamExt};
 use itertools::Itertools;
 use narwhal_types::{TransactionProto, TransactionsClient};
-use narwhal_worker::LazyNarwhalClient;
 use parking_lot::RwLockReadGuard;
 use prometheus::Histogram;
 use prometheus::HistogramVec;
@@ -50,8 +50,8 @@ use sui_simulator::anemo::PeerId;
 use sui_simulator::narwhal_network::connectivity::ConnectionStatus;
 use sui_types::base_types::AuthorityName;
 use sui_types::fp_ensure;
-use sui_types::messages_consensus::ConsensusTransaction;
 use sui_types::messages_consensus::ConsensusTransactionKind;
+use sui_types::messages_consensus::{ConsensusTransaction, ConsensusTransactionKey};
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -79,6 +79,7 @@ pub struct ConsensusAdapterMetrics {
     pub sequencing_certificate_authority_position: Histogram,
     pub sequencing_certificate_positions_moved: Histogram,
     pub sequencing_certificate_preceding_disconnected: Histogram,
+    pub sequencing_certificate_processed: IntCounterVec,
     pub sequencing_in_flight_semaphore_wait: IntGauge,
     pub sequencing_in_flight_submissions: IntGauge,
     pub sequencing_estimated_latency: IntGauge,
@@ -146,6 +147,12 @@ impl ConsensusAdapterMetrics {
                 "The number of authorities that were hashed to an earlier position that were filtered out due to being disconnected when submitting to consensus.",
                 SEQUENCING_CERTIFICATE_POSITION_BUCKETS.to_vec(),
                 registry,
+            ).unwrap(),
+            sequencing_certificate_processed: register_int_counter_vec_with_registry!(
+                "sequencing_certificate_processed",
+                "The number of certificates that have been processed either by consensus or checkpoint.",
+                &["source"],
+                registry
             ).unwrap(),
             sequencing_in_flight_semaphore_wait: register_int_gauge_with_registry!(
                 "sequencing_in_flight_semaphore_wait",
@@ -218,41 +225,6 @@ impl SubmitToConsensus for TransactionsClient<sui_network::tonic::transport::Cha
     }
 }
 
-#[async_trait::async_trait]
-impl SubmitToConsensus for LazyNarwhalClient {
-    async fn submit_to_consensus(
-        &self,
-        transactions: &[ConsensusTransaction],
-        _epoch_store: &Arc<AuthorityPerEpochStore>,
-    ) -> SuiResult {
-        let transactions = transactions
-            .iter()
-            .map(|t| bcs::to_bytes(t).expect("Serializing consensus transaction cannot fail"))
-            .collect::<Vec<_>>();
-        // The retrieved LocalNarwhalClient can be from the past epoch. Submit would fail after
-        // Narwhal shuts down, so there should be no correctness issue.
-        let client = {
-            let c = self.client.load();
-            if c.is_some() {
-                c
-            } else {
-                self.client.store(Some(self.get().await));
-                self.client.load()
-            }
-        };
-        let client = client.as_ref().unwrap().load();
-        client
-            .submit_transactions(transactions)
-            .await
-            .map_err(|e| SuiError::FailedToSubmitToConsensus(format!("{:?}", e)))
-            .tap_err(|r| {
-                // Will be logged by caller as well.
-                warn!("Submit transaction failed with: {:?}", r);
-            })?;
-        Ok(())
-    }
-}
-
 /// Submit Sui certificates to the consensus.
 pub struct ConsensusAdapter {
     /// The network client connecting to the consensus node of this authority.
@@ -277,7 +249,7 @@ pub struct ConsensusAdapter {
     consensus_throughput_profiler: ArcSwapOption<ConsensusThroughputProfiler>,
     /// A structure to register metrics
     metrics: ConsensusAdapterMetrics,
-    /// Semaphore limiting parallel submissions to narwhal
+    /// Semaphore limiting parallel submissions to consensus
     submit_semaphore: Semaphore,
     latency_observer: LatencyObserver,
     protocol_config: ProtocolConfig,
@@ -372,7 +344,7 @@ impl ConsensusAdapter {
             }
         }
         debug!(
-            "Submitting {:?} recovered pending consensus transactions to Narwhal",
+            "Submitting {:?} recovered pending consensus transactions to consensus",
             recovered.len()
         );
         for transaction in recovered {
@@ -715,29 +687,29 @@ impl ConsensusAdapter {
             "soft_bundle"
         };
 
-        let processed_waiter = epoch_store
-            .consensus_messages_processed_notify(transaction_keys.clone())
-            .boxed();
+        let mut guard = InflightDropGuard::acquire(&self, tx_type);
 
-        pin_mut!(processed_waiter);
-
+        // Create the waiter until the node's turn comes to submit to consensus
         let (await_submit, position, positions_moved, preceding_disconnected) =
             self.await_submit_delay(epoch_store.committee(), &transactions[..]);
 
-        let mut guard = InflightDropGuard::acquire(&self, tx_type);
+        // Create the waiter until the transaction is processed by consensus or via checkpoint
+        let processed_via_consensus_or_checkpoint =
+            self.await_consensus_or_checkpoint(transaction_keys.clone(), epoch_store);
+        pin_mut!(processed_via_consensus_or_checkpoint);
+
         let processed_waiter = tokio::select! {
             // We need to wait for some delay until we submit transaction to the consensus
-            _ = await_submit => Some(processed_waiter),
+            _ = await_submit => Some(processed_via_consensus_or_checkpoint),
 
             // If epoch ends, don't wait for submit delay
             _ = epoch_store.user_certs_closed_notify() => {
                 warn!(epoch = ?epoch_store.epoch(), "Epoch ended, skipping submission delay");
-                Some(processed_waiter)
+                Some(processed_via_consensus_or_checkpoint)
             }
 
-            // If transaction is received by consensus while we wait, we are done.
-            processed = &mut processed_waiter => {
-                processed.expect("Storage error when waiting for consensus message processed");
+            // If transaction is received by consensus or checkpoint while we wait, we are done.
+            _ = &mut processed_via_consensus_or_checkpoint => {
                 None
             }
         };
@@ -769,6 +741,7 @@ impl ConsensusAdapter {
         } else {
             None
         };
+
         if let Some(processed_waiter) = processed_waiter {
             debug!("Submitting {:?} to consensus", transaction_keys);
 
@@ -844,7 +817,6 @@ impl ConsensusAdapter {
                     processed_waiter.await
                 }
             }
-            .expect("Storage error when waiting for consensus message processed");
         }
         debug!("{transaction_keys:?} processed by consensus");
 
@@ -894,6 +866,43 @@ impl ConsensusAdapter {
             .sequencing_certificate_success
             .with_label_values(&[tx_type])
             .inc();
+    }
+
+    /// Waits for transactions to appear either to consensus output or been executed via a checkpoint (state sync).
+    async fn await_consensus_or_checkpoint(
+        self: &Arc<Self>,
+        transaction_keys: Vec<SequencedConsensusTransactionKey>,
+        epoch_store: &Arc<AuthorityPerEpochStore>,
+    ) {
+        let notifications = FuturesUnordered::new();
+        for transaction_key in transaction_keys {
+            let transaction_digests = if let SequencedConsensusTransactionKey::External(
+                ConsensusTransactionKey::Certificate(digest),
+            ) = transaction_key
+            {
+                vec![digest]
+            } else {
+                vec![]
+            };
+
+            // We wait for each transaction individually to be processed by consensus or executed in a checkpoint. We could equally just
+            // get notified in aggregate when all transactions are processed, but with this approach can get notified in a more fine-grained way
+            // as transactions can be marked as processed in different ways. This is mostly a concern for the soft-bundle transactions.
+            notifications.push(async move {
+                tokio::select! {
+                    processed = epoch_store.consensus_messages_processed_notify(vec![transaction_key]) => {
+                        processed.expect("Storage error when waiting for consensus message processed");
+                        self.metrics.sequencing_certificate_processed.with_label_values(&["consensus"]).inc();
+                    },
+                    processed = epoch_store.transactions_executed_in_checkpoint_notify(transaction_digests), if !transaction_digests.is_empty() => {
+                        processed.expect("Storage error when waiting for transaction executed in checkpoint");
+                        self.metrics.sequencing_certificate_processed.with_label_values(&["checkpoint"]).inc();
+                    }
+                }
+            });
+        }
+
+        notifications.collect::<Vec<()>>().await;
     }
 }
 
@@ -1029,12 +1038,12 @@ impl<'a> InflightDropGuard<'a> {
         adapter
             .metrics
             .sequencing_certificate_inflight
-            .with_label_values(&[&tx_type])
+            .with_label_values(&[tx_type])
             .inc();
         adapter
             .metrics
             .sequencing_certificate_attempt
-            .with_label_values(&[&tx_type])
+            .with_label_values(&[tx_type])
             .inc();
         Self {
             adapter,
@@ -1133,8 +1142,8 @@ mod adapter_tests {
     use super::position_submit_certificate;
     use crate::consensus_adapter::{
         ConnectionMonitorStatusForTests, ConsensusAdapter, ConsensusAdapterMetrics,
-        LazyNarwhalClient,
     };
+    use crate::mysticeti_adapter::LazyMysticetiClient;
     use fastcrypto::traits::KeyPair;
     use rand::Rng;
     use rand::{rngs::StdRng, SeedableRng};
@@ -1171,9 +1180,7 @@ mod adapter_tests {
 
         // When we define max submit position and delay step
         let consensus_adapter = ConsensusAdapter::new(
-            Arc::new(LazyNarwhalClient::new(
-                "/ip4/127.0.0.1/tcp/0/http".parse().unwrap(),
-            )),
+            Arc::new(LazyMysticetiClient::new()),
             *committee.authority_by_index(0).unwrap(),
             Arc::new(ConnectionMonitorStatusForTests {}),
             100_000,
@@ -1203,9 +1210,7 @@ mod adapter_tests {
 
         // Without submit position and delay step
         let consensus_adapter = ConsensusAdapter::new(
-            Arc::new(LazyNarwhalClient::new(
-                "/ip4/127.0.0.1/tcp/0/http".parse().unwrap(),
-            )),
+            Arc::new(LazyMysticetiClient::new()),
             *committee.authority_by_index(0).unwrap(),
             Arc::new(ConnectionMonitorStatusForTests {}),
             100_000,

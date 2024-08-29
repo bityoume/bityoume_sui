@@ -66,7 +66,7 @@ mod tests {
                 .await;
 
         cluster
-            .wait_for_checkpoint_catchup(0, Duration::from_secs(10))
+            .wait_for_checkpoint_catchup(1, Duration::from_secs(10))
             .await;
 
         let query = r#"
@@ -850,7 +850,7 @@ mod tests {
             sui_graphql_rpc::test_infra::cluster::start_cluster(ConnectionConfig::default(), None)
                 .await;
         cluster
-            .wait_for_checkpoint_catchup(0, Duration::from_secs(10))
+            .wait_for_checkpoint_catchup(1, Duration::from_secs(10))
             .await;
         // timeout test includes mutation timeout, which requies a [SuiClient] to be able to run
         // the test, and a transaction. [WalletContext] gives access to everything that's needed.
@@ -900,8 +900,10 @@ mod tests {
         let cluster =
             sui_graphql_rpc::test_infra::cluster::start_cluster(connection_config, None).await;
 
+        // We wait until checkpoint 1 is indexed, to give enough time to the
+        // watermark task to pick up a valid checkpoint timestamp.
         cluster
-            .wait_for_checkpoint_catchup(0, Duration::from_secs(10))
+            .wait_for_checkpoint_catchup(1, Duration::from_secs(10))
             .await;
         test_health_check_impl().await;
         cluster.cleanup_resources().await
