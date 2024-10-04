@@ -231,7 +231,7 @@ impl Cluster for LocalNewCluster {
 
             // Start indexer writer
             let (_, _, writer_token) = start_test_indexer(
-                Some(pg_address.clone()),
+                pg_address.clone(),
                 fullnode_url.clone(),
                 ReaderWriterConfig::writer_mode(None, None),
                 data_ingestion_path.path().to_path_buf(),
@@ -241,7 +241,7 @@ impl Cluster for LocalNewCluster {
 
             // Start indexer jsonrpc service
             let (_, _, reader_token) = start_test_indexer(
-                Some(pg_address.clone()),
+                pg_address.clone(),
                 fullnode_url.clone(),
                 ReaderWriterConfig::reader_mode(indexer_jsonrpc_address.clone()),
                 data_ingestion_path.path().to_path_buf(),
@@ -251,14 +251,12 @@ impl Cluster for LocalNewCluster {
 
             // Start the graphql service
             let graphql_address = graphql_address.parse::<SocketAddr>()?;
-            let graphql_connection_config = ConnectionConfig::new(
-                Some(graphql_address.port()),
-                Some(graphql_address.ip().to_string()),
-                Some(pg_address),
-                None,
-                None,
-                None,
-            );
+            let graphql_connection_config = ConnectionConfig {
+                port: graphql_address.port(),
+                host: graphql_address.ip().to_string(),
+                db_url: pg_address,
+                ..Default::default()
+            };
 
             start_graphql_server_with_fn_rpc(
                 graphql_connection_config.clone(),

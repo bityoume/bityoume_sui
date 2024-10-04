@@ -16,7 +16,6 @@ use std::time::Duration;
 use sui_graphql_rpc_client::simple_client::SimpleClient;
 pub use sui_indexer::config::SnapshotLagConfig;
 use sui_indexer::errors::IndexerError;
-use sui_indexer::store::indexer_store::IndexerStore;
 use sui_indexer::store::PgIndexerStore;
 use sui_indexer::tempdb::get_available_port;
 use sui_indexer::tempdb::TempDb;
@@ -33,8 +32,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-const VALIDATOR_COUNT: usize = 7;
-const EPOCH_DURATION_MS: u64 = 15000;
+const VALIDATOR_COUNT: usize = 4;
+const EPOCH_DURATION_MS: u64 = 10000;
 
 const ACCOUNT_NUM: usize = 20;
 const GAS_OBJECT_COUNT: usize = 3;
@@ -115,8 +114,9 @@ pub async fn start_network_cluster() -> NetworkCluster {
         host: "127.0.0.1".to_owned(),
         db_url: database.database().url().as_str().to_owned(),
         db_pool_size: 5,
-        prom_url: "127.0.0.1".to_owned(),
+        prom_host: "127.0.0.1".to_owned(),
         prom_port: get_available_port(),
+        skip_migration_consistency_check: false,
     };
     let data_ingestion_path = tempfile::tempdir().unwrap();
     let db_url = graphql_connection_config.db_url.clone();
@@ -127,10 +127,9 @@ pub async fn start_network_cluster() -> NetworkCluster {
 
     // Starts indexer
     let (pg_store, pg_handle) = start_test_indexer_impl(
-        Some(db_url),
+        db_url,
         val_fn.rpc_url().to_string(),
         ReaderWriterConfig::writer_mode(None, None),
-        /* reset_database */ false,
         Some(data_ingestion_path.path().to_path_buf()),
         cancellation_token.clone(),
     )
@@ -161,8 +160,9 @@ pub async fn serve_executor(
         host: "127.0.0.1".to_owned(),
         db_url: database.database().url().as_str().to_owned(),
         db_pool_size: 5,
-        prom_url: "127.0.0.1".to_owned(),
+        prom_host: "127.0.0.1".to_owned(),
         prom_port: get_available_port(),
+        skip_migration_consistency_check: false,
     };
     let db_url = graphql_connection_config.db_url.clone();
     // Creates a cancellation token and adds this to the ExecutorCluster, so that we can send a
@@ -180,10 +180,9 @@ pub async fn serve_executor(
     });
 
     let (pg_store, pg_handle) = start_test_indexer_impl(
-        Some(db_url),
+        db_url,
         format!("http://{}", executor_server_url),
         ReaderWriterConfig::writer_mode(snapshot_config.clone(), epochs_to_keep),
-        /* reset_database */ false,
         Some(data_ingestion_path),
         cancellation_token.clone(),
     )
@@ -308,9 +307,9 @@ async fn start_validator_with_fullnode(data_ingestion_dir: PathBuf) -> TestClust
         .await
 }
 
-/// Repeatedly ping the GraphQL server for 10s, until it responds
+/// Repeatedly ping the GraphQL server for 60s, until it responds
 pub async fn wait_for_graphql_server(client: &SimpleClient) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         while client.ping().await.is_err() {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -426,20 +425,6 @@ impl Cluster {
     pub async fn wait_for_checkpoint_pruned(&self, checkpoint: u64, base_timeout: Duration) {
         wait_for_graphql_checkpoint_pruned(&self.graphql_client, checkpoint, base_timeout).await
     }
-
-    /// Sends a cancellation signal to the graphql and indexer services and waits for them to
-    /// shutdown.
-    pub async fn cleanup_resources(self) {
-        self.network.cleanup_resources().await;
-        let _ = self.graphql_server_join_handle.await;
-    }
-}
-
-impl NetworkCluster {
-    pub async fn cleanup_resources(self) {
-        self.cancellation_token.cancel();
-        let _ = self.indexer_join_handle.await;
-    }
 }
 
 impl ExecutorCluster {
@@ -468,7 +453,7 @@ impl ExecutorCluster {
             .unwrap();
 
         tokio::time::timeout(base_timeout, async {
-            while latest_cp > latest_snapshot_cp + self.snapshot_config.snapshot_max_lag as u64 {
+            while latest_cp > latest_snapshot_cp + self.snapshot_config.snapshot_min_lag as u64 {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 latest_snapshot_cp = self
                     .indexer_store
@@ -488,36 +473,5 @@ impl ExecutorCluster {
     pub async fn cleanup_resources(self) {
         self.cancellation_token.cancel();
         let _ = join!(self.graphql_server_join_handle, self.indexer_join_handle);
-    }
-
-    pub async fn force_objects_snapshot_catchup(&self, start_cp: u64, end_cp: u64) {
-        self.indexer_store
-            .update_objects_snapshot(start_cp, end_cp)
-            .await
-            .unwrap();
-
-        let mut latest_snapshot_cp = self
-            .indexer_store
-            .get_latest_object_snapshot_checkpoint_sequence_number()
-            .await
-            .unwrap()
-            .unwrap_or_default();
-
-        tokio::time::timeout(Duration::from_secs(60), async {
-            while latest_snapshot_cp < end_cp - 1 {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                latest_snapshot_cp = self
-                    .indexer_store
-                    .get_latest_object_snapshot_checkpoint_sequence_number()
-                    .await
-                    .unwrap()
-                    .unwrap_or_default();
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("Timeout waiting for indexer to update objects snapshot - latest_snapshot_cp: {}, end_cp: {}",
-        latest_snapshot_cp, end_cp));
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

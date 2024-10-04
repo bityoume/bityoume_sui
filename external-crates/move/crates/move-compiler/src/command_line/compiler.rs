@@ -99,6 +99,7 @@ enum PassResult {
 #[derive(Clone)]
 pub struct FullyCompiledProgram {
     pub files: MappedFiles,
+    pub comments: CommentMap,
     pub parser: parser::ast::Program,
     pub expansion: expansion::ast::Program,
     pub naming: naming::ast::Program,
@@ -650,7 +651,7 @@ pub fn construct_pre_compiled_lib<Paths: Into<Symbol>, NamedAddress: Into<Symbol
     .add_save_hook(&hook)
     .run::<PASS_PARSER>()?;
 
-    let (_comments, stepped) = match pprog_and_comments_res {
+    let (comments, stepped) = match pprog_and_comments_res {
         Err((_pass, errors)) => return Ok(Err((files, errors))),
         Ok(res) => res,
     };
@@ -662,6 +663,7 @@ pub fn construct_pre_compiled_lib<Paths: Into<Symbol>, NamedAddress: Into<Symbol
         Err((_pass, errors)) => Ok(Err((files, errors))),
         Ok(PassResult::Compilation(compiled, _)) => Ok(Ok(FullyCompiledProgram {
             files,
+            comments,
             parser: hook.take_parser_ast(),
             expansion: hook.take_expansion_ast(),
             naming: hook.take_naming_ast(),
@@ -1060,14 +1062,4 @@ fn run(
         }
     }
     rec(compilation_env, pre_compiled_lib, cur, until)
-}
-
-//**************************************************************************************************
-// traits
-//**************************************************************************************************
-
-impl From<AbsIntVisitorObj> for Visitor {
-    fn from(f: AbsIntVisitorObj) -> Self {
-        Self::AbsIntVisitor(f)
-    }
 }

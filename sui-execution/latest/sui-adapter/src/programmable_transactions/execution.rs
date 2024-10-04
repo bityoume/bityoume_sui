@@ -19,7 +19,7 @@ mod checked {
     };
     use move_core_types::{
         account_address::AccountAddress,
-        identifier::IdentStr,
+        identifier::{IdentStr, Identifier},
         language_storage::{ModuleId, TypeTag},
         u256::U256,
     };
@@ -39,6 +39,7 @@ mod checked {
     use sui_types::execution_config_utils::to_binary_config;
     use sui_types::execution_status::{CommandArgumentError, PackageUpgradeError};
     use sui_types::storage::{get_package_objects, PackageObject};
+    use sui_types::type_input::TypeInput;
     use sui_types::{
         base_types::{
             MoveObjectType, ObjectID, SuiAddress, TxContext, TxContextKind, RESOLVED_ASCII_STR,
@@ -132,6 +133,9 @@ mod checked {
                         "input checker ensures if args are empty, there is a type specified"
                     );
                 };
+
+                let tag = to_type_tag(context, tag)?;
+
                 let elem_ty = context
                     .load_type(&tag)
                     .map_err(|e| context.convert_vm_error(e))?;
@@ -158,6 +162,7 @@ mod checked {
                 let mut arg_iter = args.into_iter().enumerate();
                 let (mut used_in_non_entry_move_call, elem_ty) = match tag_opt {
                     Some(tag) => {
+                        let tag = to_type_tag(context, tag)?;
                         let elem_ty = context
                             .load_type(&tag)
                             .map_err(|e| context.convert_vm_error(e))?;
@@ -285,9 +290,13 @@ mod checked {
                     arguments,
                 } = *move_call;
 
+                let module = to_identifier(context, module)?;
+                let function = to_identifier(context, function)?;
+
                 // Convert type arguments to `Type`s
                 let mut loaded_type_arguments = Vec::with_capacity(type_arguments.len());
                 for (ix, type_arg) in type_arguments.into_iter().enumerate() {
+                    let type_arg = to_type_tag(context, type_arg)?;
                     let ty = context
                         .load_type(&type_arg)
                         .map_err(|e| context.convert_type_argument_error(ix, e))?;
@@ -295,10 +304,12 @@ mod checked {
                 }
 
                 let original_address = context.set_link_context(package)?;
+                let storage_id = ModuleId::new(*package, module.clone());
                 let runtime_id = ModuleId::new(original_address, module);
                 let return_values = execute_move_call::<Mode>(
                     context,
                     &mut argument_updates,
+                    &storage_id,
                     &runtime_id,
                     &function,
                     loaded_type_arguments,
@@ -332,7 +343,8 @@ mod checked {
     fn execute_move_call<Mode: ExecutionMode>(
         context: &mut ExecutionContext<'_, '_, '_>,
         argument_updates: &mut Mode::ArgumentUpdates,
-        module_id: &ModuleId,
+        storage_id: &ModuleId,
+        runtime_id: &ModuleId,
         function: &IdentStr,
         type_arguments: Vec<Type>,
         arguments: Vec<Argument>,
@@ -347,21 +359,21 @@ mod checked {
             last_instr,
         } = check_visibility_and_signature::<Mode>(
             context,
-            module_id,
+            runtime_id,
             function,
             &type_arguments,
             is_init,
         )?;
         // build the arguments, storing meta data about by-mut-ref args
         let (tx_context_kind, by_mut_ref, serialized_arguments) =
-            build_move_args::<Mode>(context, module_id, function, kind, &signature, &arguments)?;
+            build_move_args::<Mode>(context, runtime_id, function, kind, &signature, &arguments)?;
         // invoke the VM
         let SerializedReturnValues {
             mutable_reference_outputs,
             return_values,
         } = vm_move_call(
             context,
-            module_id,
+            runtime_id,
             function,
             type_arguments,
             tx_context_kind,
@@ -372,7 +384,11 @@ mod checked {
             "lost mutable input"
         );
 
-        context.take_user_events(module_id, index, last_instr)?;
+        if context.protocol_config.relocate_event_module() {
+            context.take_user_events(storage_id, index, last_instr)?;
+        } else {
+            context.take_user_events(runtime_id, index, last_instr)?;
+        }
 
         // save the link context because calls to `make_value` below can set new ones, and we don't want
         // it to be clobbered.
@@ -871,6 +887,10 @@ mod checked {
             let return_values = execute_move_call::<Mode>(
                 context,
                 argument_updates,
+                // `init` is currently only called on packages when they are published for the
+                // first time, meaning their runtime and storage IDs match. If this were to change
+                // for some reason, then we would need to perform relocation here.
+                &module_id,
                 &module_id,
                 INIT_FN_NAME,
                 vec![],
@@ -1358,6 +1378,41 @@ mod checked {
             }
         }
         Ok(())
+    }
+
+    fn to_identifier(
+        context: &mut ExecutionContext<'_, '_, '_>,
+        ident: String,
+    ) -> Result<Identifier, ExecutionError> {
+        if context.protocol_config.validate_identifier_inputs() {
+            Identifier::new(ident).map_err(|e| {
+                ExecutionError::new_with_source(
+                    ExecutionErrorKind::VMInvariantViolation,
+                    e.to_string(),
+                )
+            })
+        } else {
+            // SAFETY: Preserving existing behaviour for identifier deserialization.
+            Ok(unsafe { Identifier::new_unchecked(ident) })
+        }
+    }
+
+    fn to_type_tag(
+        context: &mut ExecutionContext<'_, '_, '_>,
+        type_input: TypeInput,
+    ) -> Result<TypeTag, ExecutionError> {
+        if context.protocol_config.validate_identifier_inputs() {
+            type_input.into_type_tag().map_err(|e| {
+                ExecutionError::new_with_source(
+                    ExecutionErrorKind::VMInvariantViolation,
+                    e.to_string(),
+                )
+            })
+        } else {
+            // SAFETY: Preserving existing behaviour for identifier deserialization within type
+            // tags and inputs.
+            Ok(unsafe { type_input.into_type_tag_unchecked() })
+        }
     }
 
     fn get_datatype_ident(s: &CachedDatatype) -> (&AccountAddress, &IdentStr, &IdentStr) {

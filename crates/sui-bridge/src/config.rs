@@ -117,10 +117,20 @@ pub struct BridgeNodeConfig {
     /// Network key used for metrics pushing
     #[serde(default = "default_ed25519_key_pair")]
     pub metrics_key_pair: NetworkKeyPair,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsConfig>,
 }
 
 pub fn default_ed25519_key_pair() -> NetworkKeyPair {
     get_key_pair_from_rng(&mut rand::rngs::OsRng).1
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MetricsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push_interval_seconds: Option<u64>,
+    pub push_url: String,
 }
 
 impl Config for BridgeNodeConfig {}
@@ -148,7 +158,8 @@ impl BridgeNodeConfig {
 
         // we do this check here instead of `prepare_for_sui` below because
         // that is only called when `run_client` is true.
-        let sui_client = Arc::new(SuiClient::<SuiSdkClient>::new(&self.sui.sui_rpc_url).await?);
+        let sui_client =
+            Arc::new(SuiClient::<SuiSdkClient>::new(&self.sui.sui_rpc_url, metrics.clone()).await?);
         let bridge_committee = sui_client
             .get_bridge_committee()
             .await
@@ -159,7 +170,7 @@ impl BridgeNodeConfig {
             ));
         }
 
-        let (eth_client, eth_contracts) = self.prepare_for_eth(metrics).await?;
+        let (eth_client, eth_contracts) = self.prepare_for_eth(metrics.clone()).await?;
         let bridge_summary = sui_client
             .get_bridge_summary()
             .await
@@ -197,7 +208,7 @@ impl BridgeNodeConfig {
 
         // If client is enabled, prepare client config
         let (bridge_client_key, client_sui_address, gas_object_ref) =
-            self.prepare_for_sui(sui_client.clone()).await?;
+            self.prepare_for_sui(sui_client.clone(), metrics).await?;
 
         let db_path = self
             .db_path
@@ -238,7 +249,7 @@ impl BridgeNodeConfig {
                 .interval(std::time::Duration::from_millis(2000)),
         );
         let chain_id = provider.get_chainid().await?;
-        let (committee_address, limiter_address, vault_address, config_address) =
+        let (committee_address, limiter_address, vault_address, config_address, _weth_address) =
             get_eth_contract_addresses(bridge_proxy_address, &provider).await?;
         let config = EthBridgeConfig::new(config_address, provider.clone());
 
@@ -303,6 +314,7 @@ impl BridgeNodeConfig {
     async fn prepare_for_sui(
         &self,
         sui_client: Arc<SuiClient<SuiSdkClient>>,
+        metrics: Arc<BridgeMetrics>,
     ) -> anyhow::Result<(SuiKeyPair, SuiAddress, ObjectRef)> {
         let bridge_client_key = match &self.sui.bridge_client_key_path {
             None => read_key(&self.bridge_authority_key_path, true),
@@ -340,7 +352,6 @@ impl BridgeNodeConfig {
 
         let client_sui_address = SuiAddress::from(&bridge_client_key.public());
 
-        // TODO: decide a minimal amount here
         let gas_object_id = match self.sui.bridge_client_gas_object {
             Some(id) => id,
             None => {
@@ -348,7 +359,8 @@ impl BridgeNodeConfig {
                     .build(&self.sui.sui_rpc_url)
                     .await?;
                 let coin =
-                    pick_highest_balance_coin(sui_client.coin_read_api(), client_sui_address, 0)
+                    // Minimum balance for gas object is 10 SUI
+                    pick_highest_balance_coin(sui_client.coin_read_api(), client_sui_address, 10_000_000_000)
                         .await?;
                 coin.coin_object_id
             }
@@ -359,11 +371,11 @@ impl BridgeNodeConfig {
         if owner != Owner::AddressOwner(client_sui_address) {
             return Err(anyhow!("Gas object {:?} is not owned by bridge client key's associated sui address {:?}, but {:?}", gas_object_id, client_sui_address, owner));
         }
+        let balance = gas_coin.value();
+        metrics.gas_coin_balance.set(balance as i64);
         info!(
             "Starting bridge client with address: {:?}, gas object {:?}, balance: {}",
-            client_sui_address,
-            gas_object_ref.0,
-            gas_coin.value()
+            client_sui_address, gas_object_ref.0, balance,
         );
 
         Ok((bridge_client_key, client_sui_address, gas_object_ref))
@@ -380,7 +392,6 @@ pub struct BridgeServerConfig {
     pub approved_governance_actions: Vec<BridgeAction>,
 }
 
-// TODO: add gas balance alert threshold
 pub struct BridgeClientConfig {
     pub sui_address: SuiAddress,
     pub key: SuiKeyPair,

@@ -4,7 +4,7 @@
 module sui_system::sui_system_state_inner {
     use sui::balance::{Self, Balance};
     use sui::coin::Coin;
-    use sui_system::staking_pool::StakedSui;
+    use sui_system::staking_pool::{StakedSui, FungibleStakedSui};
     use sui::sui::SUI;
     use sui_system::validator::{Self, Validator};
     use sui_system::validator_set::{Self, ValidatorSet};
@@ -518,6 +518,22 @@ module sui_system::sui_system_state_inner {
         self.validators.request_withdraw_stake(staked_sui, ctx)
     }
 
+    public(package) fun convert_to_fungible_staked_sui(
+        self: &mut SuiSystemStateInnerV2,
+        staked_sui: StakedSui,
+        ctx: &mut TxContext,
+    ) : FungibleStakedSui {
+        self.validators.convert_to_fungible_staked_sui(staked_sui, ctx)
+    }
+
+    public(package) fun redeem_fungible_staked_sui(
+        self: &mut SuiSystemStateInnerV2,
+        fungible_staked_sui: FungibleStakedSui,
+        ctx: &TxContext,
+    ) : Balance<SUI> {
+        self.validators.redeem_fungible_staked_sui(fungible_staked_sui, ctx)
+    }
+
     /// Report a validator as a bad or non-performant actor in the system.
     /// Succeeds if all the following are satisfied:
     /// 1. both the reporter in `cap` and the input `reportee_addr` are active validators.
@@ -1021,6 +1037,10 @@ module sui_system::sui_system_state_inner {
 
     public(package) fun get_storage_fund_object_rebates(self: &SuiSystemStateInnerV2): u64 {
         self.storage_fund.total_object_storage_rebates()
+    }
+
+    public(package) fun validator_address_by_pool_id(self: &mut SuiSystemStateInnerV2, pool_id: &ID): address {
+        self.validators.validator_address_by_pool_id(pool_id)
     }
 
     public(package) fun pool_exchange_rates(

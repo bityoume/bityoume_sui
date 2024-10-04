@@ -105,6 +105,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -113,19 +116,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -146,7 +158,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:
@@ -257,6 +271,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -265,19 +282,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -298,7 +324,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:
@@ -409,6 +437,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -417,19 +448,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -450,7 +490,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:
@@ -561,6 +603,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -569,19 +614,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -602,7 +656,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:
@@ -713,6 +769,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -721,19 +780,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -754,7 +822,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:
@@ -865,6 +935,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -873,19 +946,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -906,7 +988,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:
@@ -1017,6 +1101,9 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Testnet:
         - Apple
@@ -1025,19 +1112,28 @@ validator_configs:
         - Facebook
         - Google
         - KarrierOne
+        - Onefc
+        - Playtron
+        - Threedos
         - Twitch
       Unknown:
         - Apple
+        - Arden
+        - "AwsTenant-region:eu-west-3-tenant_id:eu-west-3_gGVCx53Es"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_LPSLCkC3A"
         - "AwsTenant-region:us-east-1-tenant_id:us-east-1_qPsZxYqd8"
         - Credenza3
         - Facebook
+        - FanTV
         - Google
         - Kakao
         - KarrierOne
         - Microsoft
+        - Onefc
+        - Playtron
         - Slack
         - TestIssuer
+        - Threedos
         - Twitch
     authority-overload-config:
       max-txn-age-in-queue:
@@ -1058,7 +1154,9 @@ validator_configs:
       check-system-overload-at-signing: true
       max-transaction-manager-queue-length: 100000
       max-transaction-manager-per-object-queue-length: 100
-    execution-cache: passthrough-cache
+    execution-cache:
+      writeback-cache:
+        max_cache_size: ~
     enable-soft-bundle: true
     enable-validator-tx-finalizer: true
     verifier-signing-config:

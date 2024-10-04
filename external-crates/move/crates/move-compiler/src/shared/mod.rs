@@ -611,6 +611,14 @@ impl CompilationEnv {
             .unwrap_or(&self.default_config)
     }
 
+    pub fn package_configs(&self) -> impl Iterator<Item = (Option<Symbol>, &PackageConfig)> {
+        std::iter::once((None, &self.default_config)).chain(
+            self.package_configs
+                .iter()
+                .map(|(n, config)| (Some(*n), config)),
+        )
+    }
+
     pub fn set_primitive_type_definers(
         &mut self,
         m: BTreeMap<N::BuiltinTypeName_, E::ModuleIdent>,
@@ -935,9 +943,9 @@ impl Default for PackageConfig {
 //**************************************************************************************************
 
 pub struct Visitors {
-    pub typing: Vec<RefCell<TypingVisitorObj>>,
-    pub abs_int: Vec<RefCell<AbsIntVisitorObj>>,
-    pub cfgir: Vec<RefCell<CFGIRVisitorObj>>,
+    pub typing: Vec<TypingVisitorObj>,
+    pub abs_int: Vec<AbsIntVisitorObj>,
+    pub cfgir: Vec<CFGIRVisitorObj>,
 }
 
 impl Visitors {
@@ -950,13 +958,22 @@ impl Visitors {
         };
         for pass in passes {
             match pass {
-                Visitor::AbsIntVisitor(f) => vs.abs_int.push(RefCell::new(f)),
-                Visitor::TypingVisitor(f) => vs.typing.push(RefCell::new(f)),
-                Visitor::CFGIRVisitor(f) => vs.cfgir.push(RefCell::new(f)),
+                Visitor::AbsIntVisitor(f) => vs.abs_int.push(f),
+                Visitor::TypingVisitor(f) => vs.typing.push(f),
+                Visitor::CFGIRVisitor(f) => vs.cfgir.push(f),
             }
         }
         vs
     }
+}
+
+// TODO remove it once visitor invocation is parallel
+#[allow(unused)]
+fn check<T: Send + Sync>() {}
+#[allow(unused)]
+fn check_all() {
+    check::<Visitors>();
+    check::<&Visitors>();
 }
 
 //**************************************************************************************************

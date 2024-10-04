@@ -1,22 +1,26 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use diesel::connection::SimpleConnection;
 use mysten_metrics::init_metrics;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use simulacrum::Simulacrum;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use sui_json_rpc_types::SuiTransactionBlockResponse;
 
-use crate::config::IngestionConfig;
-use crate::config::PruningOptions;
-use crate::config::SnapshotLagConfig;
-use crate::db::{new_connection_pool, ConnectionPoolConfig};
+use crate::config::{IngestionConfig, PruningOptions, SnapshotLagConfig, UploadOptions};
+use crate::database::Connection;
+use crate::database::ConnectionPool;
+use crate::db::ConnectionPoolConfig;
 use crate::errors::IndexerError;
 use crate::indexer::Indexer;
 use crate::store::PgIndexerStore;
+use crate::tempdb::get_available_port;
+use crate::tempdb::TempDb;
 use crate::IndexerMetrics;
 
 pub enum ReaderWriterConfig {
@@ -50,7 +54,7 @@ impl ReaderWriterConfig {
 }
 
 pub async fn start_test_indexer(
-    db_url: Option<String>,
+    db_url: String,
     rpc_url: String,
     reader_writer_config: ReaderWriterConfig,
     data_ingestion_path: PathBuf,
@@ -64,7 +68,6 @@ pub async fn start_test_indexer(
         db_url,
         rpc_url,
         reader_writer_config,
-        /* reset_database */ false,
         Some(data_ingestion_path),
         token.clone(),
     )
@@ -72,25 +75,15 @@ pub async fn start_test_indexer(
     (store, handle, token)
 }
 
-/// Starts an indexer reader or writer for testing depending on the `reader_writer_config`. If
-/// `reset_database` is true, the database instance named in `db_url` will be dropped and
-/// reinstantiated.
+/// Starts an indexer reader or writer for testing depending on the `reader_writer_config`.
 pub async fn start_test_indexer_impl(
-    db_url: Option<String>,
+    db_url: String,
     rpc_url: String,
     reader_writer_config: ReaderWriterConfig,
-    reset_database: bool,
     data_ingestion_path: Option<PathBuf>,
     cancel: CancellationToken,
 ) -> (PgIndexerStore, JoinHandle<Result<(), IndexerError>>) {
-    let db_url = db_url.unwrap_or_else(|| {
-        let pg_host = "localhost";
-        let pg_port = "32770";
-        let pw = "postgrespw";
-        format!("postgres://postgres:{pw}@{pg_host}:{pg_port}")
-    });
-
-    // Reduce the connection pool size to 10 for testing
+    // Reduce the connection pool size to 5 for testing
     // to prevent maxing out
     let pool_config = ConnectionPoolConfig {
         pool_size: 5,
@@ -108,31 +101,14 @@ pub async fn start_test_indexer_impl(
 
     let indexer_metrics = IndexerMetrics::new(&registry);
 
-    let mut parsed_url = db_url.clone();
-
-    if reset_database {
-        let db_name = parsed_url.split('/').last().unwrap();
-        // Switch to default to create a new database
-        let (default_db_url, _) = replace_db_name(&parsed_url, "postgres");
-
-        // Open in default mode
-        let blocking_pool = new_connection_pool(&default_db_url, &pool_config).unwrap();
-        let mut default_conn = blocking_pool.get().unwrap();
-
-        // Delete the old db if it exists
-        default_conn
-            .batch_execute(&format!("DROP DATABASE IF EXISTS {}", db_name))
-            .unwrap();
-
-        // Create the new db
-        default_conn
-            .batch_execute(&format!("CREATE DATABASE {}", db_name))
-            .unwrap();
-        parsed_url = replace_db_name(&parsed_url, db_name).0;
-    }
-
-    let blocking_pool = new_connection_pool(&parsed_url, &pool_config).unwrap();
-    let store = PgIndexerStore::new(blocking_pool.clone(), indexer_metrics.clone());
+    let pool = ConnectionPool::new(db_url.parse().unwrap(), pool_config)
+        .await
+        .unwrap();
+    let store = PgIndexerStore::new(
+        pool.clone(),
+        UploadOptions::default(),
+        indexer_metrics.clone(),
+    );
 
     let handle = match reader_writer_config {
         ReaderWriterConfig::Reader {
@@ -141,24 +117,25 @@ pub async fn start_test_indexer_impl(
             let config = crate::config::JsonRpcConfig {
                 name_service_options: crate::config::NameServiceOptions::default(),
                 rpc_address: reader_mode_rpc_url.parse().unwrap(),
-                rpc_client_url: rpc_url.parse().unwrap(),
+                rpc_client_url: rpc_url,
             };
-            tokio::spawn(
-                async move { Indexer::start_reader(&config, &registry, blocking_pool).await },
-            )
+            tokio::spawn(async move { Indexer::start_reader(&config, &registry, pool).await })
         }
         ReaderWriterConfig::Writer {
             snapshot_config,
             pruning_options,
         } => {
-            crate::db::reset_database(&mut blocking_pool.get().unwrap()).unwrap();
+            let connection = Connection::dedicated(&db_url.parse().unwrap())
+                .await
+                .unwrap();
+            crate::db::reset_database(connection).await.unwrap();
 
             let store_clone = store.clone();
             let mut ingestion_config = IngestionConfig::default();
             ingestion_config.sources.data_ingestion_path = data_ingestion_path;
 
             tokio::spawn(async move {
-                Indexer::start_writer_with_config(
+                Indexer::start_writer(
                     &ingestion_config,
                     store_clone,
                     indexer_metrics,
@@ -172,16 +149,6 @@ pub async fn start_test_indexer_impl(
     };
 
     (store, handle)
-}
-
-fn replace_db_name(db_url: &str, new_db_name: &str) -> (String, String) {
-    let pos = db_url.rfind('/').expect("Unable to find / in db_url");
-    let old_db_name = &db_url[pos + 1..];
-
-    (
-        format!("{}/{}", &db_url[..pos], new_db_name),
-        old_db_name.to_string(),
-    )
 }
 
 #[derive(Clone)]
@@ -268,4 +235,83 @@ impl<'a> SuiTransactionBlockResponseBuilder<'a> {
             ..self.full_response.clone()
         }
     }
+}
+
+/// Set up a test indexer fetching from a REST endpoint served by the given Simulacrum.
+pub async fn set_up(
+    sim: Arc<Simulacrum>,
+    data_ingestion_path: PathBuf,
+) -> (
+    JoinHandle<()>,
+    PgIndexerStore,
+    JoinHandle<Result<(), IndexerError>>,
+    TempDb,
+) {
+    let database = TempDb::new().unwrap();
+    let server_url: SocketAddr = format!("127.0.0.1:{}", get_available_port())
+        .parse()
+        .unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        sui_rest_api::RestService::new_without_version(sim)
+            .start_service(server_url)
+            .await;
+    });
+    // Starts indexer
+    let (pg_store, pg_handle, _) = start_test_indexer(
+        database.database().url().as_str().to_owned(),
+        format!("http://{}", server_url),
+        ReaderWriterConfig::writer_mode(
+            Some(SnapshotLagConfig {
+                snapshot_min_lag: 5,
+                sleep_duration: 0,
+            }),
+            None,
+        ),
+        data_ingestion_path,
+    )
+    .await;
+    (server_handle, pg_store, pg_handle, database)
+}
+
+/// Wait for the indexer to catch up to the given checkpoint sequence number.
+pub async fn wait_for_checkpoint(
+    pg_store: &PgIndexerStore,
+    checkpoint_sequence_number: u64,
+) -> Result<(), IndexerError> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while {
+            let cp_opt = pg_store
+                .get_latest_checkpoint_sequence_number()
+                .await
+                .unwrap();
+            cp_opt.is_none() || (cp_opt.unwrap() < checkpoint_sequence_number)
+        } {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("Timeout waiting for indexer to catchup to checkpoint");
+    Ok(())
+}
+
+/// Wait for the indexer to catch up to the given checkpoint sequence number for objects snapshot.
+pub async fn wait_for_objects_snapshot(
+    pg_store: &PgIndexerStore,
+    checkpoint_sequence_number: u64,
+) -> Result<(), IndexerError> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while {
+            let cp_opt = pg_store
+                .get_latest_object_snapshot_checkpoint_sequence_number()
+                .await
+                .unwrap();
+            cp_opt.is_none() || (cp_opt.unwrap() < checkpoint_sequence_number)
+        } {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("Timeout waiting for indexer to catchup to checkpoint for objects snapshot");
+    Ok(())
 }

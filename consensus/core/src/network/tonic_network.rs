@@ -14,7 +14,7 @@ use bytes::Bytes;
 use cfg_if::cfg_if;
 use consensus_config::{AuthorityIndex, NetworkKeyPair, NetworkPublicKey};
 use futures::{stream, Stream, StreamExt as _};
-use hyper_util::rt::tokio::TokioIo;
+use hyper_util::rt::{tokio::TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use mysten_common::sync::notify_once::NotifyOnce;
 use mysten_metrics::monitored_future;
@@ -31,7 +31,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::{iter, Iter};
-use tonic::{transport::Server, Request, Response, Streaming};
+use tonic::{Request, Response, Streaming};
 use tower_http::{
     trace::{DefaultMakeSpan, DefaultOnFailure, TraceLayer},
     ServiceBuilderExt,
@@ -319,6 +319,20 @@ impl NetworkClient for TonicClient {
             }
         }
         Ok(blocks)
+    }
+
+    async fn get_latest_rounds(
+        &self,
+        peer: AuthorityIndex,
+        timeout: Duration,
+    ) -> ConsensusResult<Vec<Round>> {
+        let mut client = self.get_client(peer, timeout).await?;
+        let mut request = Request::new(GetLatestRoundsRequest {});
+        request.set_timeout(timeout);
+        let response = client.get_latest_rounds(request).await.map_err(|e| {
+            ConsensusError::NetworkRequest(format!("get_latest_rounds failed: {e:?}"))
+        })?;
+        Ok(response.into_inner().highest_received)
     }
 }
 
@@ -616,6 +630,25 @@ impl<S: NetworkService> ConsensusService for TonicServiceProxy<S> {
         let stream = iter(responses);
         Ok(Response::new(stream))
     }
+
+    async fn get_latest_rounds(
+        &self,
+        request: Request<GetLatestRoundsRequest>,
+    ) -> Result<Response<GetLatestRoundsResponse>, tonic::Status> {
+        let Some(peer_index) = request
+            .extensions()
+            .get::<PeerInfo>()
+            .map(|p| p.authority_index)
+        else {
+            return Err(tonic::Status::internal("PeerInfo not found"));
+        };
+        let highest_received = self
+            .service
+            .handle_get_latest_rounds(peer_index)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("{e:?}")))?;
+        Ok(Response::new(GetLatestRoundsResponse { highest_received }))
+    }
 }
 
 /// Manages the lifecycle of Tonic network client and service. Typical usage during initialization:
@@ -677,31 +710,30 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
         let service = TonicServiceProxy::new(self.context.clone(), service);
         let config = &self.context.parameters.tonic;
 
-        let consensus_service = Server::builder()
-            .layer(
-                TraceLayer::new_for_grpc()
-                    .make_span_with(DefaultMakeSpan::new().level(tracing::Level::TRACE))
-                    .on_failure(DefaultOnFailure::new().level(tracing::Level::DEBUG)),
-            )
-            .initial_connection_window_size(64 << 20)
-            .initial_stream_window_size(32 << 20)
-            .http2_keepalive_interval(Some(config.keepalive_interval))
-            .http2_keepalive_timeout(Some(config.keepalive_interval))
-            // tcp keepalive is unsupported by msim
-            .add_service(
-                ConsensusServiceServer::new(service)
-                    .max_encoding_message_size(config.message_size_limit)
-                    .max_decoding_message_size(config.message_size_limit),
-            )
-            .into_router();
+        let consensus_service = tonic::service::Routes::new(
+            ConsensusServiceServer::new(service)
+                .max_encoding_message_size(config.message_size_limit)
+                .max_decoding_message_size(config.message_size_limit),
+        )
+        .into_axum_router();
 
         let inbound_metrics = self.context.metrics.network_metrics.inbound.clone();
         let excessive_message_size = self.context.parameters.tonic.excessive_message_size;
 
-        let http =
-            hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                .http2_only();
-        let http = Arc::new(http);
+        let http = {
+            let mut builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .http2_only();
+            builder
+                .http2()
+                .timer(TokioTimer::new())
+                .initial_connection_window_size(64 << 20)
+                .initial_stream_window_size(32 << 20)
+                .keep_alive_interval(Some(config.keepalive_interval))
+                .keep_alive_timeout(config.keepalive_interval);
+
+            Arc::new(builder)
+        };
 
         let tls_server_config =
             create_rustls_server_config(&self.context, self.network_keypair.clone());
@@ -874,7 +906,12 @@ impl<S: NetworkService> NetworkManager<S> for TonicManager {
                             inbound_metrics,
                             excessive_message_size,
                         )))
-                        .service(consensus_service.clone());
+                        .layer(
+                            TraceLayer::new_for_grpc()
+                                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::TRACE))
+                                .on_failure(DefaultOnFailure::new().level(tracing::Level::DEBUG)),
+                        )
+                        .service(consensus_service);
 
                     pin! {
                         let connection = http.serve_connection(TokioIo::new(tls_stream), TowerToHyperService::new(svc));
@@ -1141,6 +1178,16 @@ pub(crate) struct FetchLatestBlocksResponse {
     // The response of the requested blocks as Serialized SignedBlock.
     #[prost(bytes = "bytes", repeated, tag = "1")]
     blocks: Vec<Bytes>,
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct GetLatestRoundsRequest {}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct GetLatestRoundsResponse {
+    // Highest received round per authority.
+    #[prost(uint32, repeated, tag = "1")]
+    highest_received: Vec<u32>,
 }
 
 fn chunk_blocks(blocks: Vec<Bytes>, chunk_limit: usize) -> Vec<Vec<Bytes>> {
