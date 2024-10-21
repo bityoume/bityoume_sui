@@ -1,5 +1,20 @@
 # @mysten/zksend
 
+## 0.11.8
+
+### Patch Changes
+
+- Updated dependencies [477d2a4]
+  - @mysten/sui@1.13.0
+  - @mysten/wallet-standard@0.13.8
+
+## 0.11.7
+
+### Patch Changes
+
+- af39b6a: Update to reflect GraphQL schema renaming TransactionBlockFilter.signAddress to
+  .sentAddress.
+
 ## 0.11.6
 
 ### Patch Changes

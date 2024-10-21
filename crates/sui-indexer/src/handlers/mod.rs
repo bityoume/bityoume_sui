@@ -12,10 +12,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     errors::IndexerError,
-    models::{display::StoredDisplay, obj_indices::StoredObjectVersion},
+    models::{
+        display::StoredDisplay,
+        epoch::{EndOfEpochUpdate, StartOfEpochUpdate},
+        obj_indices::StoredObjectVersion,
+    },
     types::{
-        EventIndex, IndexedCheckpoint, IndexedDeletedObject, IndexedEpochInfo, IndexedEvent,
-        IndexedObject, IndexedPackage, IndexedTransaction, IndexerResult, TxIndex,
+        EventIndex, IndexedCheckpoint, IndexedDeletedObject, IndexedEvent, IndexedObject,
+        IndexedPackage, IndexedTransaction, IndexerResult, TxIndex,
     },
 };
 
@@ -26,6 +30,7 @@ pub mod pruner;
 pub mod tx_processor;
 
 pub(crate) const CHECKPOINT_COMMIT_BATCH_SIZE: usize = 100;
+pub(crate) const UNPROCESSED_CHECKPOINT_SIZE_LIMIT: usize = 1000;
 
 #[derive(Debug)]
 pub struct CheckpointDataToCommit {
@@ -50,9 +55,28 @@ pub struct TransactionObjectChangesToCommit {
 
 #[derive(Clone, Debug)]
 pub struct EpochToCommit {
-    pub last_epoch: Option<IndexedEpochInfo>,
-    pub new_epoch: IndexedEpochInfo,
-    pub network_total_transactions: u64,
+    pub last_epoch: Option<EndOfEpochUpdate>,
+    pub new_epoch: StartOfEpochUpdate,
+}
+
+impl EpochToCommit {
+    pub fn new_epoch_id(&self) -> u64 {
+        self.new_epoch.epoch as u64
+    }
+
+    pub fn new_epoch_first_checkpoint_id(&self) -> u64 {
+        self.new_epoch.first_checkpoint_id as u64
+    }
+
+    pub fn last_epoch_total_transactions(&self) -> Option<u64> {
+        self.last_epoch
+            .as_ref()
+            .map(|e| e.epoch_total_transactions as u64)
+    }
+
+    pub fn new_epoch_first_tx_sequence_number(&self) -> u64 {
+        self.new_epoch.first_tx_sequence_number as u64
+    }
 }
 
 pub struct CommonHandler<T> {
@@ -93,17 +117,25 @@ impl<T> CommonHandler<T> {
             }
 
             // Try to fetch new data tuple from the stream
-            match stream.next().now_or_never() {
-                Some(Some(tuple_chunk)) => {
-                    if cancel.is_cancelled() {
-                        return Ok(());
+            if unprocessed.len() >= UNPROCESSED_CHECKPOINT_SIZE_LIMIT {
+                tracing::info!(
+                    "Unprocessed checkpoint size reached limit {}, skip reading from stream...",
+                    UNPROCESSED_CHECKPOINT_SIZE_LIMIT
+                );
+            } else {
+                // Try to fetch new data tuple from the stream
+                match stream.next().now_or_never() {
+                    Some(Some(tuple_chunk)) => {
+                        if cancel.is_cancelled() {
+                            return Ok(());
+                        }
+                        for tuple in tuple_chunk {
+                            unprocessed.insert(tuple.0.checkpoint_hi_inclusive, tuple);
+                        }
                     }
-                    for tuple in tuple_chunk {
-                        unprocessed.insert(tuple.0.cp, tuple);
-                    }
+                    Some(None) => break, // Stream has ended
+                    None => {}           // No new data tuple available right now
                 }
-                Some(None) => break, // Stream has ended
-                None => {}           // No new data tuple available right now
             }
 
             // Process unprocessed checkpoints, even no new checkpoints from stream
@@ -164,20 +196,21 @@ pub trait Handler<T>: Send + Sync {
 
 /// The indexer writer operates on checkpoint data, which contains information on the current epoch,
 /// checkpoint, and transaction. These three numbers form the watermark upper bound for each
-/// committed table.
+/// committed table. The reader and pruner are responsible for determining which of the three units
+/// will be used for a particular table.
 #[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub struct CommitterWatermark {
-    pub epoch: u64,
-    pub cp: u64,
-    pub tx: u64,
+    pub epoch_hi_inclusive: u64,
+    pub checkpoint_hi_inclusive: u64,
+    pub tx_hi: u64,
 }
 
 impl From<&IndexedCheckpoint> for CommitterWatermark {
     fn from(checkpoint: &IndexedCheckpoint) -> Self {
         Self {
-            epoch: checkpoint.epoch,
-            cp: checkpoint.sequence_number,
-            tx: checkpoint.network_total_transactions.saturating_sub(1),
+            epoch_hi_inclusive: checkpoint.epoch,
+            checkpoint_hi_inclusive: checkpoint.sequence_number,
+            tx_hi: checkpoint.network_total_transactions,
         }
     }
 }
@@ -185,17 +218,14 @@ impl From<&IndexedCheckpoint> for CommitterWatermark {
 impl From<&CheckpointData> for CommitterWatermark {
     fn from(checkpoint: &CheckpointData) -> Self {
         Self {
-            epoch: checkpoint.checkpoint_summary.epoch,
-            cp: checkpoint.checkpoint_summary.sequence_number,
-            tx: checkpoint
-                .checkpoint_summary
-                .network_total_transactions
-                .saturating_sub(1),
+            epoch_hi_inclusive: checkpoint.checkpoint_summary.epoch,
+            checkpoint_hi_inclusive: checkpoint.checkpoint_summary.sequence_number,
+            tx_hi: checkpoint.checkpoint_summary.network_total_transactions,
         }
     }
 }
 
-/// Enum representing tables that a committer updates.
+/// Enum representing tables that the committer handler writes to.
 #[derive(
     Debug,
     Eq,
@@ -253,7 +283,7 @@ pub enum CommitterTables {
     PrunerCpWatermark,
 }
 
-/// Enum representing tables that the objects snapshot processor updates.
+/// Enum representing tables that the objects snapshot handler writes to.
 #[derive(
     Debug,
     Eq,

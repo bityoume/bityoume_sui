@@ -1,5 +1,36 @@
 # @mysten/deepbook-v3
 
+## 0.12.1
+
+### Patch Changes
+
+- Updated dependencies [477d2a4]
+  - @mysten/sui@1.13.0
+
+## 0.12.0
+
+### Minor Changes
+
+- 60f96ee: New stablecoin pool params
+
+## 0.11.0
+
+### Minor Changes
+
+- 7b8e8ad: Mainnet pool packages
+
+## 0.10.0
+
+### Minor Changes
+
+- 23c3a3a: DEEP Mainnet Redeploy
+
+## 0.9.0
+
+### Minor Changes
+
+- 89f2e59: Mainnet packages
+
 ## 0.8.5
 
 ### Patch Changes

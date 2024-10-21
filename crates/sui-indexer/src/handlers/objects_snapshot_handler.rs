@@ -34,6 +34,7 @@ pub struct CheckpointObjectChanges {
 
 #[async_trait]
 impl Worker for ObjectsSnapshotHandler {
+    type Result = ();
     async fn process_checkpoint(&self, checkpoint: &CheckpointData) -> anyhow::Result<()> {
         let transformed_data = CheckpointHandler::index_objects(checkpoint, &self.metrics).await?;
         self.sender
@@ -72,7 +73,7 @@ impl Handler<TransactionObjectChangesToCommit> for ObjectsSnapshotHandler {
 
         self.metrics
             .latest_object_snapshot_sequence_number
-            .set(watermark.cp as i64);
+            .set(watermark.checkpoint_hi_inclusive as i64);
         Ok(())
     }
 

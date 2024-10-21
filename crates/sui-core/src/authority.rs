@@ -4,6 +4,7 @@
 
 use crate::execution_cache::ExecutionCacheTraitPointers;
 use crate::execution_cache::TransactionCacheRead;
+use crate::jsonrpc_index::CoinIndexKey2;
 use crate::rest_index::RestIndexStore;
 use crate::transaction_outputs::TransactionOutputs;
 use crate::verify_indexes::verify_indexes;
@@ -52,6 +53,7 @@ use sui_types::layout_resolver::into_struct_layout;
 use sui_types::layout_resolver::LayoutResolver;
 use sui_types::messages_consensus::{AuthorityCapabilitiesV1, AuthorityCapabilitiesV2};
 use sui_types::object::bounded_visitor::BoundedVisitor;
+use sui_types::transaction_executor::SimulateTransactionResult;
 use tap::{TapFallible, TapOptional};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -63,6 +65,8 @@ use self::authority_store_pruner::AuthorityStorePruningMetrics;
 pub use authority_store::{AuthorityStore, ResolverWrapper, UpdateType};
 use mysten_metrics::{monitored_scope, spawn_monitored_task};
 
+use crate::jsonrpc_index::IndexStore;
+use crate::jsonrpc_index::{CoinInfo, ObjectIndexChanges};
 use once_cell::sync::OnceCell;
 use shared_crypto::intent::{AppId, Intent, IntentMessage, IntentScope, IntentVersion};
 use sui_archival::reader::ArchiveReaderBalancer;
@@ -75,10 +79,8 @@ use sui_json_rpc_types::{
     SuiTransactionBlockEvents, TransactionFilter,
 };
 use sui_macros::{fail_point, fail_point_async, fail_point_if};
-use sui_storage::indexes::{CoinInfo, ObjectIndexChanges};
 use sui_storage::key_value_store::{TransactionKeyValueStore, TransactionKeyValueStoreTrait};
 use sui_storage::key_value_store_metrics::KeyValueStoreMetrics;
-use sui_storage::IndexStore;
 use sui_types::authenticator_state::get_authenticator_state;
 use sui_types::committee::{EpochId, ProtocolVersion};
 use sui_types::crypto::{default_hash, AuthoritySignInfo, Signer};
@@ -1975,6 +1977,135 @@ impl AuthorityState {
         ))
     }
 
+    pub fn simulate_transaction(
+        &self,
+        transaction: TransactionData,
+    ) -> SuiResult<SimulateTransactionResult> {
+        if transaction.kind().is_system_tx() {
+            return Err(SuiError::UnsupportedFeatureError {
+                error: "simulate does not support system transactions".to_string(),
+            });
+        }
+
+        let epoch_store = self.load_epoch_store_one_call_per_task();
+        if !self.is_fullnode(&epoch_store) {
+            return Err(SuiError::UnsupportedFeatureError {
+                error: "simulate is only supported on fullnodes".to_string(),
+            });
+        }
+
+        self.simulate_transaction_impl(&epoch_store, transaction)
+    }
+
+    fn simulate_transaction_impl(
+        &self,
+        epoch_store: &AuthorityPerEpochStore,
+        transaction: TransactionData,
+    ) -> SuiResult<SimulateTransactionResult> {
+        // Cheap validity checks for a transaction, including input size limits.
+        transaction.validity_check_no_gas_check(epoch_store.protocol_config())?;
+
+        let input_object_kinds = transaction.input_objects()?;
+        let receiving_object_refs = transaction.receiving_objects();
+
+        sui_transaction_checks::deny::check_transaction_for_signing(
+            &transaction,
+            &[],
+            &input_object_kinds,
+            &receiving_object_refs,
+            &self.config.transaction_deny_config,
+            self.get_backing_package_store().as_ref(),
+        )?;
+
+        let (input_objects, receiving_objects) = self.input_loader.read_objects_for_signing(
+            // We don't want to cache this transaction since it's a dry run.
+            None,
+            &input_object_kinds,
+            &receiving_object_refs,
+            epoch_store.epoch(),
+        )?;
+
+        // make a gas object if one was not provided
+        let mut gas_object_refs = transaction.gas().to_vec();
+        let ((gas_status, checked_input_objects), mock_gas) = if transaction.gas().is_empty() {
+            let sender = transaction.sender();
+            // use a 1B sui coin
+            const MIST_TO_SUI: u64 = 1_000_000_000;
+            const DRY_RUN_SUI: u64 = 1_000_000_000;
+            let max_coin_value = MIST_TO_SUI * DRY_RUN_SUI;
+            let gas_object_id = ObjectID::MAX;
+            let gas_object = Object::new_move(
+                MoveObject::new_gas_coin(OBJECT_START_VERSION, gas_object_id, max_coin_value),
+                Owner::AddressOwner(sender),
+                TransactionDigest::genesis_marker(),
+            );
+            let gas_object_ref = gas_object.compute_object_reference();
+            gas_object_refs = vec![gas_object_ref];
+            (
+                sui_transaction_checks::check_transaction_input_with_given_gas(
+                    epoch_store.protocol_config(),
+                    epoch_store.reference_gas_price(),
+                    &transaction,
+                    input_objects,
+                    receiving_objects,
+                    gas_object,
+                    &self.metrics.bytecode_verifier_metrics,
+                    &self.config.verifier_signing_config,
+                )?,
+                Some(gas_object_id),
+            )
+        } else {
+            (
+                sui_transaction_checks::check_transaction_input(
+                    epoch_store.protocol_config(),
+                    epoch_store.reference_gas_price(),
+                    &transaction,
+                    input_objects,
+                    &receiving_objects,
+                    &self.metrics.bytecode_verifier_metrics,
+                    &self.config.verifier_signing_config,
+                )?,
+                None,
+            )
+        };
+
+        let protocol_config = epoch_store.protocol_config();
+        let (kind, signer, _) = transaction.execution_parts();
+
+        let silent = true;
+        let executor = sui_execution::executor(protocol_config, silent, None)
+            .expect("Creating an executor should not fail here");
+
+        let expensive_checks = false;
+        let (inner_temp_store, _, effects, _execution_error) = executor
+            .execute_transaction_to_effects(
+                self.get_backing_store().as_ref(),
+                protocol_config,
+                self.metrics.limits_metrics.clone(),
+                expensive_checks,
+                self.config.certificate_deny_config.certificate_deny_set(),
+                &epoch_store.epoch_start_config().epoch_data().epoch_id(),
+                epoch_store
+                    .epoch_start_config()
+                    .epoch_data()
+                    .epoch_start_timestamp(),
+                checked_input_objects,
+                gas_object_refs,
+                gas_status,
+                kind,
+                signer,
+                transaction.digest(),
+            );
+
+        Ok(SimulateTransactionResult {
+            input_objects: inner_temp_store.input_objects,
+            output_objects: inner_temp_store.written,
+            events: effects.events_digest().map(|_| inner_temp_store.events),
+            effects,
+            mock_gas_id: mock_gas,
+        })
+    }
+
     /// The object ID for gas can be any object ID, even for an uncreated object
     #[allow(clippy::collapsible_else_if)]
     #[instrument(skip_all)]
@@ -3534,10 +3665,10 @@ impl AuthorityState {
         &self,
         owner: SuiAddress,
         // If `Some`, the query will start from the next item after the specified cursor
-        cursor: (String, ObjectID),
+        cursor: (String, u64, ObjectID),
         limit: usize,
         one_coin_type_only: bool,
-    ) -> SuiResult<impl Iterator<Item = (String, ObjectID, CoinInfo)> + '_> {
+    ) -> SuiResult<impl Iterator<Item = (CoinIndexKey2, CoinInfo)> + '_> {
         if let Some(indexes) = &self.indexes {
             indexes.get_owned_coins_iterator_with_cursor(owner, cursor, limit, one_coin_type_only)
         } else {
@@ -3993,6 +4124,14 @@ impl AuthorityState {
                     limit,
                     descending,
                 )?,
+            // not using "_ =>" because we want to make sure we remember to add new variants here
+            EventFilter::Any(_) => {
+                return Err(SuiError::UserInputError {
+                    error: UserInputError::Unsupported(
+                        "'Any' queries are not supported by the fullnode.".to_string(),
+                    ),
+                })
+            }
         };
 
         // skip one event if exclusive cursor is provided,
