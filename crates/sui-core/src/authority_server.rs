@@ -4,7 +4,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fastcrypto::traits::KeyPair;
 use mysten_metrics::spawn_monitored_task;
+use mysten_network::server::SUI_TLS_SERVER_NAME;
 use prometheus::{
     register_histogram_with_registry, register_int_counter_vec_with_registry,
     register_int_counter_with_registry, Histogram, IntCounter, IntCounterVec, Registry,
@@ -149,6 +151,11 @@ impl AuthorityServer {
         self,
         address: Multiaddr,
     ) -> Result<AuthorityServerHandle, io::Error> {
+        let tls_config = sui_tls::create_rustls_server_config(
+            self.state.config.network_key_pair().copy().private(),
+            SUI_TLS_SERVER_NAME.to_string(),
+            sui_tls::AllowAll,
+        );
         let mut server = mysten_network::config::Config::new()
             .server_builder()
             .add_service(ValidatorServer::new(ValidatorService::new_for_tests(
@@ -156,7 +163,7 @@ impl AuthorityServer {
                 self.consensus_adapter,
                 self.metrics,
             )))
-            .bind(&address)
+            .bind(&address, Some(tls_config))
             .await
             .unwrap();
         let local_addr = server.local_addr().to_owned();
@@ -191,6 +198,7 @@ pub struct ValidatorServiceMetrics {
     forwarded_header_parse_error: IntCounter,
     forwarded_header_invalid: IntCounter,
     forwarded_header_not_included: IntCounter,
+    client_id_source_config_mismatch: IntCounter,
 }
 
 impl ValidatorServiceMetrics {
@@ -319,6 +327,12 @@ impl ValidatorServiceMetrics {
             forwarded_header_not_included: register_int_counter_with_registry!(
                 "validator_service_forwarded_header_not_included",
                 "Number of times x-forwarded-for header was (unexpectedly) not included in request",
+                registry,
+            )
+            .unwrap(),
+            client_id_source_config_mismatch: register_int_counter_with_registry!(
+                "validator_service_client_id_source_config_mismatch",
+                "Number of times detected that client id source config doesn't agree with x-forwarded-for header",
                 registry,
             )
             .unwrap(),
@@ -828,7 +842,7 @@ impl ValidatorService {
                             .await?
                     }
                     ConsensusTransactionKind::UserTransaction(tx) => {
-                        self.state.await_transaction_effects(*tx.digest()).await?
+                        self.state.await_transaction_effects(*tx.digest(), epoch_store).await?
                     }
                     _ => panic!("`handle_submit_to_consensus` received transaction that is not a CertifiedTransaction or UserTransaction"),
                 };
@@ -1218,6 +1232,19 @@ impl ValidatorService {
                                 return None;
                             }
                             let contents_len = header_contents.len();
+                            if contents_len < *num_hops {
+                                error!(
+                                    "x-forwarded-for header value of {:?} contains {} values, but {} hops were specified. \
+                                    Expected at least {} values. Please correctly set the `x-forwarded-for` value under \
+                                    `client-id-source` in the node config.",
+                                    header_contents,
+                                    contents_len,
+                                    num_hops,
+                                    contents_len,
+                                );
+                                self.metrics.client_id_source_config_mismatch.inc();
+                                return None;
+                            }
                             let Some(client_ip) = header_contents.get(contents_len - num_hops)
                             else {
                                 error!(
@@ -1289,7 +1316,11 @@ impl ValidatorService {
             traffic_controller.tally(TrafficTally {
                 direct: client,
                 through_fullnode: None,
-                error_weight: error.map(normalize).unwrap_or(Weight::zero()),
+                error_info: error.map(|e| {
+                    let error_type = String::from(e.clone().as_ref());
+                    let error_weight = normalize(e);
+                    (error_weight, error_type)
+                }),
                 spam_weight,
                 timestamp: SystemTime::now(),
             })
@@ -1313,8 +1344,10 @@ fn make_tonic_request_for_testing<T>(message: T) -> tonic::Request<T> {
 // TODO: refine error matching here
 fn normalize(err: SuiError) -> Weight {
     match err {
-        SuiError::UserInputError { .. }
-        | SuiError::InvalidSignature { .. }
+        SuiError::UserInputError {
+            error: UserInputError::IncorrectUserSignature { .. },
+        } => Weight::one(),
+        SuiError::InvalidSignature { .. }
         | SuiError::SignerSignatureAbsent { .. }
         | SuiError::SignerSignatureNumberMismatch { .. }
         | SuiError::IncorrectSigner { .. }
