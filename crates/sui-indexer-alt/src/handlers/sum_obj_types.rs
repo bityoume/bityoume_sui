@@ -9,34 +9,30 @@ use std::{
 use anyhow::{anyhow, ensure};
 use diesel::{upsert::excluded, ExpressionMethods};
 use diesel_async::RunQueryDsl;
-use futures::future::try_join_all;
+use futures::future::{try_join_all, Either};
+use sui_field_count::FieldCount;
+use sui_indexer_alt_framework::pipeline::{sequential::Handler, Processor};
+use sui_indexer_alt_schema::{
+    objects::{StoredObjectUpdate, StoredOwnerKind, StoredSumObjType},
+    schema::sum_obj_types,
+};
+use sui_pg_db as db;
 use sui_types::{
     base_types::ObjectID, effects::TransactionEffectsAPI, full_checkpoint_content::CheckpointData,
     object::Owner,
 };
 
-use crate::{
-    db,
-    models::objects::{StoredObjectUpdate, StoredOwnerKind, StoredSumObjType},
-    pipeline::{sequential::Handler, Processor},
-    schema::sum_obj_types,
-};
+const MAX_INSERT_CHUNK_ROWS: usize = i16::MAX as usize / StoredSumObjType::FIELD_COUNT;
+const MAX_DELETE_CHUNK_ROWS: usize = i16::MAX as usize;
 
-/// Each insert or update will include at most this many rows -- the size is chosen to maximize the
-/// rows without hitting the limit on bind parameters.
-const UPDATE_CHUNK_ROWS: usize = i16::MAX as usize / 8;
-
-/// Each deletion will include at most this many rows.
-const DELETE_CHUNK_ROWS: usize = i16::MAX as usize;
-
-pub struct SumObjTypes;
+pub(crate) struct SumObjTypes;
 
 impl Processor for SumObjTypes {
     const NAME: &'static str = "sum_obj_types";
 
     type Value = StoredObjectUpdate<StoredSumObjType>;
 
-    fn process(checkpoint: &Arc<CheckpointData>) -> anyhow::Result<Vec<Self::Value>> {
+    fn process(&self, checkpoint: &Arc<CheckpointData>) -> anyhow::Result<Vec<Self::Value>> {
         let CheckpointData {
             transactions,
             checkpoint_summary,
@@ -99,6 +95,8 @@ impl Processor for SumObjTypes {
                                     Owner::ObjectOwner(_) => StoredOwnerKind::Object,
                                     Owner::Shared { .. } => StoredOwnerKind::Shared,
                                     Owner::Immutable => StoredOwnerKind::Immutable,
+                                    // TODO: Implement support for ConsensusV2 objects.
+                                    Owner::ConsensusV2 { .. } => todo!(),
                                 },
 
                                 owner_id: match object.owner() {
@@ -156,29 +154,30 @@ impl Handler for SumObjTypes {
             }
         }
 
-        let update_chunks = updates.chunks(UPDATE_CHUNK_ROWS).map(|chunk| {
-            diesel::insert_into(sum_obj_types::table)
-                .values(chunk)
-                .on_conflict(sum_obj_types::object_id)
-                .do_update()
-                .set((
-                    sum_obj_types::object_version.eq(excluded(sum_obj_types::object_version)),
-                    sum_obj_types::owner_kind.eq(excluded(sum_obj_types::owner_kind)),
-                    sum_obj_types::owner_id.eq(excluded(sum_obj_types::owner_id)),
-                ))
-                .execute(conn)
+        let update_chunks = updates.chunks(MAX_INSERT_CHUNK_ROWS).map(Either::Left);
+        let delete_chunks = deletes.chunks(MAX_DELETE_CHUNK_ROWS).map(Either::Right);
+
+        let futures = update_chunks.chain(delete_chunks).map(|chunk| match chunk {
+            Either::Left(update) => Either::Left(
+                diesel::insert_into(sum_obj_types::table)
+                    .values(update)
+                    .on_conflict(sum_obj_types::object_id)
+                    .do_update()
+                    .set((
+                        sum_obj_types::object_version.eq(excluded(sum_obj_types::object_version)),
+                        sum_obj_types::owner_kind.eq(excluded(sum_obj_types::owner_kind)),
+                        sum_obj_types::owner_id.eq(excluded(sum_obj_types::owner_id)),
+                    ))
+                    .execute(conn),
+            ),
+
+            Either::Right(delete) => Either::Right(
+                diesel::delete(sum_obj_types::table)
+                    .filter(sum_obj_types::object_id.eq_any(delete.iter().cloned()))
+                    .execute(conn),
+            ),
         });
 
-        let updated: usize = try_join_all(update_chunks).await?.into_iter().sum();
-
-        let delete_chunks = deletes.chunks(DELETE_CHUNK_ROWS).map(|chunk| {
-            diesel::delete(sum_obj_types::table)
-                .filter(sum_obj_types::object_id.eq_any(chunk.iter().cloned()))
-                .execute(conn)
-        });
-
-        let deleted: usize = try_join_all(delete_chunks).await?.into_iter().sum();
-
-        Ok(updated + deleted)
+        Ok(try_join_all(futures).await?.into_iter().sum())
     }
 }

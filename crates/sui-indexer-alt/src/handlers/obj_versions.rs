@@ -5,22 +5,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use diesel_async::RunQueryDsl;
+use sui_indexer_alt_framework::pipeline::{concurrent::Handler, Processor};
+use sui_indexer_alt_schema::{objects::StoredObjVersion, schema::obj_versions};
+use sui_pg_db as db;
 use sui_types::full_checkpoint_content::CheckpointData;
 
-use crate::{
-    db,
-    models::objects::StoredObjVersion,
-    pipeline::{concurrent::Handler, Processor},
-    schema::obj_versions,
-};
-
-pub struct ObjVersions;
+pub(crate) struct ObjVersions;
 
 impl Processor for ObjVersions {
     const NAME: &'static str = "obj_versions";
     type Value = StoredObjVersion;
 
-    fn process(checkpoint: &Arc<CheckpointData>) -> Result<Vec<Self::Value>> {
+    fn process(&self, checkpoint: &Arc<CheckpointData>) -> Result<Vec<Self::Value>> {
         let CheckpointData {
             transactions,
             checkpoint_summary,
@@ -49,7 +45,6 @@ impl Processor for ObjVersions {
 #[async_trait::async_trait]
 impl Handler for ObjVersions {
     const MIN_EAGER_ROWS: usize = 100;
-    const MAX_CHUNK_ROWS: usize = 1000;
     const MAX_PENDING_ROWS: usize = 10000;
 
     async fn commit(values: &[Self::Value], conn: &mut db::Connection<'_>) -> Result<usize> {
