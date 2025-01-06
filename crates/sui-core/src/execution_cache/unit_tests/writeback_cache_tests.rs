@@ -78,6 +78,7 @@ impl Scenario {
             &Default::default(),
             store.clone(),
             (*METRICS).clone(),
+            BackpressureManager::new_for_tests(),
         ));
         Self {
             authority,
@@ -376,6 +377,7 @@ impl Scenario {
             &Default::default(),
             self.store.clone(),
             self.cache.metrics.clone(),
+            BackpressureManager::new_for_tests(),
         ));
 
         // reset the scenario state to match the db
@@ -1229,6 +1231,7 @@ async fn latest_object_cache_race_test() {
         &Default::default(),
         store.clone(),
         (*METRICS).clone(),
+        BackpressureManager::new_for_tests(),
     ));
 
     let object_id = ObjectID::random();
@@ -1241,7 +1244,11 @@ async fn latest_object_cache_race_test() {
         std::thread::spawn(move || {
             let mut version = OBJECT_START_VERSION;
             while start.elapsed() < Duration::from_secs(2) {
-                let object = Object::with_id_owner_version_for_testing(object_id, version, owner);
+                let object = Object::with_id_owner_version_for_testing(
+                    object_id,
+                    version,
+                    Owner::AddressOwner(owner),
+                );
 
                 cache
                     .write_object_entry(&object_id, version, object.into())
@@ -1281,8 +1288,11 @@ async fn latest_object_cache_race_test() {
                     std::thread::sleep(Duration::from_micros(1));
                 }
 
-                let object =
-                    Object::with_id_owner_version_for_testing(object_id, latest_version, owner);
+                let object = Object::with_id_owner_version_for_testing(
+                    object_id,
+                    latest_version,
+                    Owner::AddressOwner(owner),
+                );
 
                 // because we obtained the ticket before reading the object, we will not write a stale
                 // version to the cache.
